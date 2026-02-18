@@ -167,6 +167,7 @@ public class ClerkRealEstateBoardEqualizationFactorProgram
             boolean hasMoreCardsToProcess = true;
             while (hasMoreCardsToProcess)
             {
+                // PROCESS THE NEXT CARD.
                 lastCardFileReadResult = readCardAndWriteOutput(cardFile, equalizationFactorFile, printReport);
 
                 // ACCUMULATE PER-ITERATION COUNTS INTO RUNNING TOTALS.
@@ -174,6 +175,7 @@ public class ClerkRealEstateBoardEqualizationFactorProgram
                 entireProgramRunRecordStatistics.outputCount += lastCardFileReadResult.statistics.outputCount;
                 entireProgramRunRecordStatistics.errorCount += lastCardFileReadResult.statistics.errorCount;
 
+                // CHECK IF MORE CARDS STILL NEED TO BE PROCESSED.
                 hasMoreCardsToProcess = (!lastCardFileReadResult.isEndOfFile && !lastCardFileReadResult.isSequenceError);
             }
 
