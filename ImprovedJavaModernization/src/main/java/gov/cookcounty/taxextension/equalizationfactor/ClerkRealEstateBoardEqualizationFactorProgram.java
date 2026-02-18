@@ -153,7 +153,7 @@ public class ClerkRealEstateBoardEqualizationFactorProgram
         PrintReportFile printReport = new PrintReportFile(printReportFilePath, currentDateString);
 
         // ENSURE ALL FILES ARE CLOSED SHOULD AN EXCEPTION OCCUR.
-        // We also need to track the last readiig result for the purposes of determining the return code.
+        // We also need to track the last reading result for the purposes of determining the return code.
         CardFileReadResult lastCardFileReadResult = null;
         try
         {
