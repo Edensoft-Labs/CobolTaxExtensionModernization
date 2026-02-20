@@ -1,50 +1,52 @@
 #!/usr/bin/env python3
-"""
-COBOL Test Harness for CLREB020 - Equalization Factor Edit and List Program
-
-This harness runs the compiled GnuCOBOL executable CLREB020.exe against a suite
-of test cases and validates the output.
-
-Usage:
-    python Testing/CLREB020/cobol_test_harness.py [--generate-expected] [--verbose]
-
-Options:
-    --generate-expected   Run all tests and save outputs as expected baselines
-    --verbose             Show detailed output for each test case
-
-GnuCOBOL DD Name Mapping:
-    The COBOL source uses SELECT...ASSIGN TO UT-S-CARDS, UT-S-FACTOR, UT-S-PRINT.
-    GnuCOBOL strips the "UT-S-" prefix and uses the remainder as the environment
-    variable name (with DD_ prefix). Therefore:
-        DD_CARDS  -> CARD-FILE   (input, 80-byte fixed-length records)
-        DD_FACTOR -> FACTOR-FILE (output, 21-byte fixed-length records)
-        DD_PRINT  -> PRINT-FILE  (output, 133-char print records, line sequential)
-
-File Format Notes:
-    - Input cards are BINARY fixed-length 80-byte records with NO line terminators.
-      GnuCOBOL reads them as RECORDING MODE F with RECORD CONTAINS 80 CHARACTERS.
-    - Factor output is BINARY fixed-length 21-byte records with NO line terminators.
-    - Print output uses GnuCOBOL's default line sequential mode with ASA carriage
-      control characters converted to newlines and form feeds.
-
-CLREB020 Program Behavior:
-    - Reads 80-char card records from CARD-FILE
-    - Card layout: pos 1-2 = CD-YR (year), pos 3 = CD-QUAD (1-4),
-      pos 4-8 = CD-FACTOR (5 digits as 9V9999), pos 9-80 = filler spaces
-    - Validates: year is numeric & >0, factor is numeric & >0, quad is 1-4
-    - Sequence checks cards (ascending order on first 3 chars: year+quad)
-    - Writes 21-char factor records to FACTOR-FILE
-    - Writes 133-char print records to PRINT-FILE
-    - Sets RETURN-CODE to 16 on sequence error
-    - DISPLAYs input/output/error counts to console (stdout)
-
-Note on zero-factor behavior:
-    The COBOL code checks "CD-FACTOR GREATER THAN 0" using an alphanumeric
-    comparison (CD-FACTOR is PIC X(5)). "00000" compared to "0" (space-padded
-    to "0    ") is GREATER because '0' (0x30) > ' ' (0x20) in ASCII. Therefore,
-    a factor of "00000" is treated as VALID by the original program. This is a
-    faithful reproduction of the original mainframe behavior.
-"""
+## \file cobol_test_harness.py
+## COBOL Test Harness for CLREB020 - Equalization Factor Edit and List Program.
+##
+## This harness runs the compiled GnuCOBOL executable CLREB020.exe against a suite
+## of test cases and validates the output.
+##
+## Usage:
+##     python Testing/CLREB020/cobol_test_harness.py [--generate-expected] [--verbose]
+##
+## Options:
+##     --generate-expected   Run all tests and save outputs as expected baselines
+##     --verbose             Show detailed output for each test case
+##
+## GnuCOBOL DD Name Mapping:
+##     The COBOL source uses SELECT...ASSIGN TO UT-S-CARDS, UT-S-FACTOR, UT-S-PRINT.
+##     GnuCOBOL strips the "UT-S-" prefix and uses the remainder as the environment
+##     variable name (with DD_ prefix). Therefore:
+##         DD_CARDS  -> CARD-FILE   (input, 80-byte fixed-length records)
+##         DD_FACTOR -> FACTOR-FILE (output, 21-byte fixed-length records)
+##         DD_PRINT  -> PRINT-FILE  (output, 133-char print records, line sequential)
+##
+## File Format Notes:
+##     - Input cards are BINARY fixed-length 80-byte records with NO line terminators.
+##       GnuCOBOL reads them as RECORDING MODE F with RECORD CONTAINS 80 CHARACTERS.
+##     - Factor output is BINARY fixed-length 21-byte records with NO line terminators.
+##     - Print output uses GnuCOBOL's default line sequential mode with ASA carriage
+##       control characters converted to newlines and form feeds.
+##
+## CLREB020 Program Behavior:
+##     - Reads 80-char card records from CARD-FILE
+##     - Card layout:
+##       - position 1-2 = CD-YR (year)
+##       - position 3 = CD-QUAD (1-4)
+##       - position 4-8 = CD-FACTOR (5 digits as 9V9999)
+##       - position 9-80 = filler spaces
+##     - Validates: year is numeric & >0, factor is numeric & >0, quad is 1-4
+##     - Sequence checks cards (ascending order on first 3 chars: year+quad)
+##     - Writes 21-char factor records to FACTOR-FILE
+##     - Writes 133-char print records to PRINT-FILE
+##     - Sets RETURN-CODE to 16 on sequence error
+##     - DISPLAYs input/output/error counts to console (stdout)
+##
+## Note on zero-factor behavior:
+##     The COBOL code checks "CD-FACTOR GREATER THAN 0" using an alphanumeric
+##     comparison (CD-FACTOR is PIC X(5)). "00000" compared to "0" (space-padded
+##     to "0    ") is GREATER because '0' (0x30) > ' ' (0x20) in ASCII. Therefore,
+##     a factor of "00000" is treated as VALID by the original program. This is a
+##     faithful reproduction of the original mainframe behavior.
 
 import os
 import sys
@@ -52,221 +54,54 @@ import subprocess
 import tempfile
 import shutil
 import argparse
-from pathlib import Path
+import pathlib
 
-
-# ============================================================================
-# Configuration
-# ============================================================================
-
-# Resolve paths relative to this script's location
-SCRIPT_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = SCRIPT_DIR.parent.parent
-
-BUILD_DIR = PROJECT_ROOT / "Build"
-EXE_PATH = BUILD_DIR / "output" / "CLREB020.exe"
-TEST_CASES_DIR = SCRIPT_DIR / "test_cases"
-EXPECTED_OUTPUT_DIR = SCRIPT_DIR / "expected_output"
-
-# GnuCOBOL DD name environment variables (determined by experimentation)
-# For SELECT CARD-FILE ASSIGN TO UT-S-CARDS, GnuCOBOL uses "CARDS"
-# Environment variable convention: DD_<name>
-DD_INPUT_VAR = "DD_CARDS"
-DD_FACTOR_VAR = "DD_FACTOR"
-DD_PRINT_VAR = "DD_PRINT"
-
-# File names within each test case directory
-INPUT_FILENAME = "input.dat"
-FACTOR_FILENAME = "factor.dat"
-PRINT_FILENAME = "print.dat"
-STDOUT_FILENAME = "stdout.txt"
-RETURN_CODE_FILENAME = "returncode.txt"
-
-# Record sizes (bytes)
-INPUT_RECORD_SIZE = 80
-FACTOR_RECORD_SIZE = 21
-
+import test_utilities
 
 # ============================================================================
-# Test Case Definitions
+# COBOL-SPECIFIC CONFIGURATION
 # ============================================================================
-
-TEST_CASES = [
-    # === Existing Tests (1-7) ===
-    {"name": "valid_basic", "description": "4 valid cards (year 25, quads 1-4, factor 29744)", "expect_rc": 0, "expect_factor_records": 4, "expect_error_count": 0},
-    {"name": "valid_multipage", "description": "64 valid cards to trigger page breaks", "expect_rc": 0, "expect_factor_records": 64, "expect_error_count": 0},
-    {"name": "invalid_not_numeric", "description": "Non-numeric factor 'ABCDE' and year 'AB'", "expect_rc": 0, "expect_factor_records": 0, "expect_error_count": 2},
-    {"name": "invalid_bad_quad", "description": "Quad = '5' (invalid, must be 1-4)", "expect_rc": 0, "expect_factor_records": 0, "expect_error_count": 1},
-    {"name": "invalid_zero_factor", "description": "Factor '00000' accepted (alphanumeric quirk)", "expect_rc": 0, "expect_factor_records": 1, "expect_error_count": 0},
-    {"name": "sequence_error", "description": "Two cards descending (252 then 251)", "expect_rc": 16, "expect_factor_records": 1, "expect_error_count": 0},
-    {"name": "empty_input", "description": "Empty file (0 bytes)", "expect_rc": 0, "expect_factor_records": 0, "expect_error_count": 0},
-    # === Field Boundary Tests (8-17) ===
-    {"name": "boundary_year_01", "description": "Lowest valid year '01'", "expect_rc": 0, "expect_factor_records": 1, "expect_error_count": 0},
-    {"name": "boundary_year_99", "description": "Highest valid year '99'", "expect_rc": 0, "expect_factor_records": 1, "expect_error_count": 0},
-    {"name": "boundary_year_00", "description": "Year '00' passes COBOL (alphanumeric quirk)", "expect_rc": 0, "expect_factor_records": 1, "expect_error_count": 0},
-    {"name": "boundary_quad_1", "description": "Lower bound valid quad '1'", "expect_rc": 0, "expect_factor_records": 1, "expect_error_count": 0},
-    {"name": "boundary_quad_4", "description": "Upper bound valid quad '4'", "expect_rc": 0, "expect_factor_records": 1, "expect_error_count": 0},
-    {"name": "boundary_quad_0", "description": "Quad '0' just below valid range", "expect_rc": 0, "expect_factor_records": 0, "expect_error_count": 1},
-    {"name": "boundary_quad_5", "description": "Quad '5' just above valid range", "expect_rc": 0, "expect_factor_records": 0, "expect_error_count": 1},
-    {"name": "boundary_factor_00001", "description": "Minimum nonzero factor '00001'", "expect_rc": 0, "expect_factor_records": 1, "expect_error_count": 0},
-    {"name": "boundary_factor_99999", "description": "Maximum factor '99999'", "expect_rc": 0, "expect_factor_records": 1, "expect_error_count": 0},
-    {"name": "boundary_factor_10000", "description": "Factor '10000' = 1.0 (no equalization)", "expect_rc": 0, "expect_factor_records": 1, "expect_error_count": 0},
-    # === Validation Combinatorial Tests (18-26) ===
-    {"name": "invalid_year_letters", "description": "Year 'AB' - pure non-numeric", "expect_rc": 0, "expect_factor_records": 0, "expect_error_count": 1},
-    {"name": "invalid_year_mixed", "description": "Year '2A' - mixed numeric/alpha", "expect_rc": 0, "expect_factor_records": 0, "expect_error_count": 1},
-    {"name": "invalid_year_spaces", "description": "Year '  ' - spaces fail NUMERIC", "expect_rc": 0, "expect_factor_records": 0, "expect_error_count": 1},
-    {"name": "invalid_factor_mixed", "description": "Factor '29A44' - letter in digits", "expect_rc": 0, "expect_factor_records": 0, "expect_error_count": 1},
-    {"name": "invalid_factor_spaces", "description": "Factor '2 744' - space in digits", "expect_rc": 0, "expect_factor_records": 0, "expect_error_count": 1},
-    {"name": "invalid_quad_9", "description": "Quad '9' - numeric but out of range", "expect_rc": 0, "expect_factor_records": 0, "expect_error_count": 1},
-    {"name": "invalid_quad_space", "description": "Quad ' ' - not in '1'..'4'", "expect_rc": 0, "expect_factor_records": 0, "expect_error_count": 1},
-    {"name": "invalid_quad_letter", "description": "Quad 'A' - not in '1'..'4'", "expect_rc": 0, "expect_factor_records": 0, "expect_error_count": 1},
-    {"name": "invalid_all_fields_bad", "description": "All fields invalid: 'XY', 'Z', 'ABCDE'", "expect_rc": 0, "expect_factor_records": 0, "expect_error_count": 1},
-    # === Sequence Tests (27-31) ===
-    {"name": "sequence_ascending_all_quads", "description": "2 years x 4 quads ascending", "expect_rc": 0, "expect_factor_records": 8, "expect_error_count": 0},
-    {"name": "sequence_year_transition", "description": "Cards spanning year boundary (24->25->26)", "expect_rc": 0, "expect_factor_records": 5, "expect_error_count": 0},
-    {"name": "sequence_duplicate_key", "description": "Duplicate year+quad allowed (LESS THAN check)", "expect_rc": 0, "expect_factor_records": 3, "expect_error_count": 0},
-    {"name": "sequence_error_after_valid", "description": "2 valid then out-of-sequence (RC=16)", "expect_rc": 16, "expect_factor_records": 2, "expect_error_count": 0},
-    {"name": "sequence_error_immediate", "description": "Second card out of sequence (RC=16)", "expect_rc": 16, "expect_factor_records": 1, "expect_error_count": 0},
-    # === Data-Flow and State Tests (32-34) ===
-    {"name": "mixed_valid_invalid_stream", "description": "V,I,V,I,V,V - tests WK-MESG cleanup", "expect_rc": 0, "expect_factor_records": 4, "expect_error_count": 2},
-    {"name": "error_message_cleanup", "description": "V-I-V: verify error msg doesn't bleed", "expect_rc": 0, "expect_factor_records": 2, "expect_error_count": 1},
-    {"name": "counter_invariant", "description": "10 cards (7V+3I): verify IN=OUT+ERR", "expect_rc": 0, "expect_factor_records": 7, "expect_error_count": 3},
-    # === Page Break Tests (35-39) ===
-    {"name": "page_break_at_23_cards", "description": "23 cards - just below page break", "expect_rc": 0, "expect_factor_records": 23, "expect_error_count": 0},
-    {"name": "page_break_at_24_cards", "description": "24 cards - exact page break trigger", "expect_rc": 0, "expect_factor_records": 24, "expect_error_count": 0},
-    {"name": "page_break_at_25_cards", "description": "25 cards - one past page break", "expect_rc": 0, "expect_factor_records": 25, "expect_error_count": 0},
-    {"name": "page_break_three_pages", "description": "72 cards - 3+ pages", "expect_rc": 0, "expect_factor_records": 72, "expect_error_count": 0},
-    {"name": "page_break_with_errors", "description": "30 cards (25V+5I) with page breaks", "expect_rc": 0, "expect_factor_records": 25, "expect_error_count": 5},
-    # === Business Scenario Tests (40-43) ===
-    {"name": "business_annual_run", "description": "Standard annual run: yr 25, quads 1-4", "expect_rc": 0, "expect_factor_records": 4, "expect_error_count": 0},
-    {"name": "business_multi_year", "description": "3 years x 4 quads = 12 cards", "expect_rc": 0, "expect_factor_records": 12, "expect_error_count": 0},
-    {"name": "business_data_entry_error", "description": "5 cards: 4 valid + 1 typo", "expect_rc": 0, "expect_factor_records": 4, "expect_error_count": 1},
-    {"name": "business_factor_unity", "description": "Factor '10000' = 1.0000", "expect_rc": 0, "expect_factor_records": 1, "expect_error_count": 0},
-    # === Output Format Tests (44-48) ===
-    {"name": "factor_record_exact_bytes", "description": "4 cards for byte-level factor check", "expect_rc": 0, "expect_factor_records": 4, "expect_error_count": 0},
-    {"name": "print_detail_exact_layout", "description": "1 valid card for print layout check", "expect_rc": 0, "expect_factor_records": 1, "expect_error_count": 0},
-    {"name": "print_header_exact_layout", "description": "1 valid card for header verification", "expect_rc": 0, "expect_factor_records": 1, "expect_error_count": 0},
-    {"name": "print_error_line_layout", "description": "1 invalid card for error line check", "expect_rc": 0, "expect_factor_records": 0, "expect_error_count": 1},
-    {"name": "factor_display_formatting", "description": "5 factors for N.NNNN display check", "expect_rc": 0, "expect_factor_records": 5, "expect_error_count": 0},
-    # === Single-Card Edge Cases (49-50) ===
-    {"name": "single_valid_card", "description": "Minimum valid: 1 card", "expect_rc": 0, "expect_factor_records": 1, "expect_error_count": 0},
-    {"name": "single_invalid_card", "description": "Single invalid card (all fields bad)", "expect_rc": 0, "expect_factor_records": 0, "expect_error_count": 1},
-]
-
+## Directory containing GnuCOBOL runtime DLLs (libcob, etc.) and cobc.exe.
+g_build_directory_path: pathlib.Path = test_utilities.g_project_root_absolute_path / "Build"
+## Compiled GnuCOBOL executable for CLREB020.
+g_cobol_executable_path: pathlib.Path = g_build_directory_path / "output" / "CLREB020.exe"
+## Environment variable name for the CARD-FILE input (DD_CARDS).
+## GnuCOBOL maps SELECT...ASSIGN TO UT-S-CARDS to this env var.
+DD_INPUT_ENVIRONMENT_VARIABLE_NAME: str = "DD_CARDS"
+## Environment variable name for the FACTOR-FILE output (DD_FACTOR).
+DD_FACTOR_ENVIRONMENT_VARIABLE_NAME: str = "DD_FACTOR"
+## Environment variable name for the PRINT-FILE output (DD_PRINT).
+DD_PRINT_ENVIRONMENT_VARIABLE_NAME: str = "DD_PRINT"
 
 # ============================================================================
-# Helper Functions
+# TEST RUNNER
 # ============================================================================
 
-def parse_stdout_counts(stdout_text):
-    """Parse the DISPLAY output from CLREB020 to extract counts.
-
-    Expected format:
-        NO. OF INPUT RECORDS  = +NNN
-        NO. OF OUTPUT RECORDS = +NNN
-        NO. OF ERROR RECORDS  = +NNN
-
-    Returns dict with keys: input_count, output_count, error_count.
-    Returns None for any value that cannot be parsed.
-    """
-    counts = {"input_count": None, "output_count": None, "error_count": None}
-    for line in stdout_text.splitlines():
-        line = line.strip()
-        if "INPUT RECORDS" in line and "=" in line:
-            try:
-                val = line.split("=")[1].strip().lstrip("+")
-                counts["input_count"] = int(val)
-            except (ValueError, IndexError):
-                pass
-        elif "OUTPUT RECORDS" in line and "=" in line:
-            try:
-                val = line.split("=")[1].strip().lstrip("+")
-                counts["output_count"] = int(val)
-            except (ValueError, IndexError):
-                pass
-        elif "ERROR RECORDS" in line and "=" in line:
-            try:
-                val = line.split("=")[1].strip().lstrip("+")
-                counts["error_count"] = int(val)
-            except (ValueError, IndexError):
-                pass
-    return counts
-
-
-def count_factor_records(factor_file_path):
-    """Count the number of 21-byte records in the factor file."""
-    if not os.path.exists(factor_file_path):
-        return 0
-    size = os.path.getsize(factor_file_path)
-    if size == 0:
-        return 0
-    if size % FACTOR_RECORD_SIZE != 0:
-        return -1  # Indicates corrupt file
-    return size // FACTOR_RECORD_SIZE
-
-
-def files_match(file1, file2):
-    """Compare two files byte-for-byte. Returns True if identical."""
-    if not os.path.exists(file1) and not os.path.exists(file2):
-        return True
-    if not os.path.exists(file1) or not os.path.exists(file2):
-        # One exists and the other doesn't -- check if both are effectively empty
-        existing = file1 if os.path.exists(file1) else file2
-        return os.path.getsize(existing) == 0
-    with open(file1, "rb") as f1, open(file2, "rb") as f2:
-        return f1.read() == f2.read()
-
-
-def text_files_match(file1, file2):
-    """Compare two text files, ignoring the date line (which changes daily).
-
-    The print file contains a date line with the current date (YYYYMMDD format).
-    We strip that dynamic content before comparison so tests are repeatable.
-    """
-    def normalize_print_content(filepath):
-        if not os.path.exists(filepath):
-            return ""
-        with open(filepath, "r", errors="replace") as f:
-            lines = f.readlines()
-        normalized = []
-        for line in lines:
-            stripped = line.rstrip()
-            # The date line starts with form-feed + spaces + 8-digit date
-            # e.g., "\x0c           20260211"
-            # Replace the date portion with a placeholder
-            if stripped and stripped[0] == "\x0c" and len(stripped) >= 20:
-                # Replace the 8-char date at positions 12-19 with "XXXXXXXX"
-                normalized.append(stripped[:12] + "XXXXXXXX" + stripped[20:])
-            else:
-                normalized.append(stripped)
-        return "\n".join(normalized)
-
-    content1 = normalize_print_content(file1)
-    content2 = normalize_print_content(file2)
-    return content1 == content2
-
-
-# ============================================================================
-# Test Runner
-# ============================================================================
-
-def run_test(test_case, verbose=False):
-    """Run a single test case and return results.
-
-    Returns a dict with:
-        passed: bool
-        failures: list of failure reason strings
-        return_code: int
-        stdout: str
-        stderr: str
-        factor_records: int
-        counts: dict from parse_stdout_counts
-    """
-    name = test_case["name"]
-    input_path = TEST_CASES_DIR / name / INPUT_FILENAME
-    expected_dir = EXPECTED_OUTPUT_DIR / name
-
-    results = {
+## Run a single COBOL test case and validate all outputs.
+##
+## Executes CLREB020.exe in a temporary directory with DD environment variables
+## pointing to the input file and output locations. Validates the return code,
+## stderr (should be empty), factor record count, error count from DISPLAY
+## output, and compares all output files against expected baselines.
+##
+## \param[in] test_case - Test case definition dict containing:
+##     - "name" (str): Test case directory name under test_cases/.
+##     - "description" (str): Human-readable summary of what the test covers.
+##     - "expect_rc" (int or None): Expected process return code, if any.
+##     - "expect_factor_records" (int or None): Expected number of factor records, if any.
+##     - "expect_error_count" (int or None): Expected error count from DISPLAY output, if any.
+## \param[in] verbose - If True, show detailed output for the test case.
+## \return Result dict containing:
+##     - "passed" (bool): True if all validations succeeded.
+##     - "failures" (list[str]): Human-readable descriptions of each validation failure.
+##     - "return_code" (int or None): Process exit code, None if the process did not run.
+##     - "stdout" (str): Captured standard output text from the process.
+##     - "stderr" (str): Captured standard error text from the process.
+##     - "factor_records" (int): Number of 21-byte factor records in the output file.
+##     - "counts" (dict): Parsed record counts from DISPLAY output (input_count, output_count, error_count).
+def run_test(test_case: dict, verbose: bool = False) -> dict:
+    # INITIALIZE THE TEST RESULT.
+    test_result: dict = {
         "passed": True,
         "failures": [],
         "return_code": None,
@@ -276,358 +111,517 @@ def run_test(test_case, verbose=False):
         "counts": {},
     }
 
-    # Verify input exists
-    if not input_path.exists():
-        results["passed"] = False
-        results["failures"].append(f"Input file not found: {input_path}")
-        return results
+    # CHECK THAT THE INPUT CARD FILE EXISTS.
+    name: str = test_case["name"]
+    input_card_file_path: pathlib.Path = test_utilities.g_test_cases_directory_path / name / test_utilities.INPUT_FILENAME
+    input_card_file_exists: bool = input_card_file_path.exists()
+    if not input_card_file_exists:
+        # INDICATE THAT THE TEST FAILED BECAUSE THE INPUT CARD FILE WAS NOT FOUND.
+        test_result["passed"] = False
+        test_result["failures"].append(f"Input file not found: {input_card_file_path}")
+        return test_result
 
-    # Create temp directory for output files
-    tmpdir = tempfile.mkdtemp(prefix=f"clreb020_test_{name}_")
-    factor_path = os.path.join(tmpdir, FACTOR_FILENAME)
-    print_path = os.path.join(tmpdir, PRINT_FILENAME)
-
+    # EXECUTE THE COBOL PROGRAM IN A TEMPORARY DIRECTORY.
+    # A temporary directory is used to hold some files that will be cleaned up after the test.
+    temporary_directory_path: str = tempfile.mkdtemp(prefix = f"clreb020_test_{name}_")
     try:
-        # Build environment with GnuCOBOL DLL path and DD mappings
-        env = os.environ.copy()
-        env["PATH"] = str(BUILD_DIR) + os.pathsep + env.get("PATH", "")
-        env[DD_INPUT_VAR] = str(input_path)
-        env[DD_FACTOR_VAR] = factor_path
-        env[DD_PRINT_VAR] = print_path
+        # BUILD THE ENVIRONMENT WITH GNUCOBOL DLL PATH AND DD ENVIRONMENT VARIABLE FILE MAPPINGS.
+        process_environment: dict = os.environ.copy()
+        process_environment["PATH"] = str(g_build_directory_path) + os.pathsep + process_environment.get("PATH", "")
+        process_environment[DD_INPUT_ENVIRONMENT_VARIABLE_NAME] = str(input_card_file_path)
+        factor_path: str = os.path.join(temporary_directory_path, test_utilities.FACTOR_FILENAME)
+        process_environment[DD_FACTOR_ENVIRONMENT_VARIABLE_NAME] = factor_path
+        print_path: str = os.path.join(temporary_directory_path, test_utilities.PRINT_FILENAME)
+        process_environment[DD_PRINT_ENVIRONMENT_VARIABLE_NAME] = print_path
 
-        # Run the executable
+        # RUN THE COBOL EXECUTABLE.
         try:
-            result = subprocess.run(
-                [str(EXE_PATH)],
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=30,
-                cwd=tmpdir,
-            )
+            process_result: subprocess.CompletedProcess = subprocess.run(
+                [str(g_cobol_executable_path)],
+                env = process_environment,
+                capture_output = True,
+                text = True,
+                timeout = test_utilities.SUBPROCESS_TIMEOUT_IN_SECONDS,
+                cwd = temporary_directory_path)
         except subprocess.TimeoutExpired:
-            results["passed"] = False
-            results["failures"].append("Execution timed out (30 seconds)")
-            return results
+            test_result["passed"] = False
+            test_result["failures"].append(f"Execution timed out ({test_utilities.SUBPROCESS_TIMEOUT_IN_SECONDS} seconds)")
+            return test_result
         except FileNotFoundError:
-            results["passed"] = False
-            results["failures"].append(f"Executable not found: {EXE_PATH}")
-            return results
+            test_result["passed"] = False
+            test_result["failures"].append(f"Executable not found: {g_cobol_executable_path}")
+            return test_result
 
-        results["return_code"] = result.returncode
-        results["stdout"] = result.stdout
-        results["stderr"] = result.stderr
+        # STORE THE PROCESS RESULTS.
+        test_result["return_code"] = process_result.returncode
+        test_result["stdout"] = process_result.stdout
+        test_result["stderr"] = process_result.stderr
+        test_result["counts"] = test_utilities.parse_stdout_counts(process_result.stdout)
+        test_result["factor_records"] = test_utilities.count_factor_records(factor_path)
 
-        # Parse DISPLAY counts from stdout
-        results["counts"] = parse_stdout_counts(result.stdout)
-
-        # Count factor records
-        results["factor_records"] = count_factor_records(factor_path)
-
-        # ---- Validation checks ----
-
-        # 1. Check return code
-        if test_case.get("expect_rc") is not None:
-            if result.returncode != test_case["expect_rc"]:
-                results["passed"] = False
-                results["failures"].append(
-                    f"Return code: expected {test_case['expect_rc']}, "
-                    f"got {result.returncode}"
-                )
-
-        # 2. Check stderr (should be empty for successful runs)
-        if result.stderr.strip():
-            results["passed"] = False
-            results["failures"].append(f"Unexpected stderr: {result.stderr.strip()[:200]}")
-
-        # 3. Check factor record count
-        if test_case.get("expect_factor_records") is not None:
-            actual_records = results["factor_records"]
-            expected_records = test_case["expect_factor_records"]
-            if actual_records != expected_records:
-                results["passed"] = False
-                results["failures"].append(
-                    f"Factor records: expected {expected_records}, "
-                    f"got {actual_records}"
-                )
-
-        # 4. Check error count from DISPLAY output
-        if test_case.get("expect_error_count") is not None:
-            actual_errors = results["counts"].get("error_count")
-            expected_errors = test_case["expect_error_count"]
-            if actual_errors != expected_errors:
-                results["passed"] = False
-                results["failures"].append(
-                    f"Error count: expected {expected_errors}, "
-                    f"got {actual_errors}"
-                )
-
-        # 5. Compare against expected output files (if they exist)
-        expected_factor = expected_dir / FACTOR_FILENAME
-        expected_print = expected_dir / PRINT_FILENAME
-        expected_stdout = expected_dir / STDOUT_FILENAME
-        expected_rc_file = expected_dir / RETURN_CODE_FILENAME
-
-        if expected_factor.exists():
-            if not files_match(factor_path, str(expected_factor)):
-                results["passed"] = False
-                results["failures"].append(
-                    "Factor file does not match expected output"
-                )
-
-        if expected_print.exists():
-            if not text_files_match(print_path, str(expected_print)):
-                results["passed"] = False
-                results["failures"].append(
-                    "Print file does not match expected output (ignoring date)"
-                )
-
-        if expected_stdout.exists():
-            with open(expected_stdout, "r") as f:
-                expected_stdout_text = f.read()
-            # Compare stdout ignoring leading/trailing whitespace on each line
-            actual_lines = [l.strip() for l in result.stdout.splitlines()]
-            expected_lines = [l.strip() for l in expected_stdout_text.splitlines()]
-            if actual_lines != expected_lines:
-                results["passed"] = False
-                results["failures"].append(
-                    "Stdout does not match expected output"
-                )
-
-        if expected_rc_file.exists():
-            with open(expected_rc_file, "r") as f:
-                expected_rc = int(f.read().strip())
-            if result.returncode != expected_rc:
-                results["passed"] = False
-                results["failures"].append(
-                    f"Return code file mismatch: expected {expected_rc}, "
-                    f"got {result.returncode}"
-                )
+        # VALIDATE ALL OUTPUTS AGAINST EXPECTATIONS.
+        _validate_return_code(test_result, test_case, process_result.returncode)
+        _validate_stderr_empty(test_result, process_result.stderr)
+        _validate_factor_record_count(test_result, test_case)
+        _validate_error_count(test_result, test_case)
+        expected_directory_path: pathlib.Path = test_utilities.g_expected_output_directory_path / name
+        _validate_against_expected_baselines(test_result, expected_directory_path, factor_path, print_path, process_result)
 
     finally:
-        # Clean up temp directory
+        # CLEAN UP THE TEMPORARY DIRECTORY.
         try:
-            shutil.rmtree(tmpdir)
+            shutil.rmtree(temporary_directory_path)
         except OSError:
             pass
 
-    return results
+    return test_result
 
+## Check that the process exit code matches the expected value.
+##
+## If the test case specifies an expected return code ("expect_rc") and the
+## actual return code differs, marks the test as failed.
+##
+## \param[in,out] test_result - Test result dict to update with pass/fail status and failure messages.
+## \param[in] test_case - Test case definition dict (may contain "expect_rc").
+## \param[in] actual_return_code - The process exit code returned by the COBOL executable.
+def _validate_return_code(test_result: dict, test_case: dict, actual_return_code: int):
+    # CHECK IF THERE IS AN EXPECTED RETURN CODE.
+    expected_return_code: object = test_case.get("expect_rc")
+    has_expected_return_code: bool = expected_return_code is not None
+    if has_expected_return_code:
+        # CHECK IF THE RETURN CODES ARE DIFFERENT.
+        return_codes_differ: bool = actual_return_code != expected_return_code
+        if return_codes_differ:
+            # TRACK THE FAILURE.
+            test_result["passed"] = False
+            test_result["failures"].append(f"Return code: expected {expected_return_code}, got {actual_return_code}")
 
-def generate_expected_outputs(verbose=False):
-    """Run all test cases and save the outputs as expected baselines."""
-    print("=" * 70)
+## Check that stderr is empty (GnuCOBOL runtime errors go to stderr).
+##
+## Any non-empty stderr output indicates an unexpected runtime error from the
+## GnuCOBOL runtime library and causes the test to fail.
+##
+## \param[in,out] test_result - Test result dict to update with pass/fail status and failure messages.
+## \param[in] stderr_text - Captured standard error text from the process.
+def _validate_stderr_empty(test_result: dict, stderr_text: str):
+    # CHECK IF THERE IS STDERR OUTPUT.
+    has_stderr_output: bool = bool(stderr_text.strip())
+    if has_stderr_output:
+        # TRACK THE FAILURE.
+        # Only a preview of stderr is included to keep failure messages readable.
+        STDERR_PREVIEW_LENGTH_IN_CHARACTERS: int = 200
+        test_result["passed"] = False
+        test_result["failures"].append(f"Unexpected stderr: {stderr_text.strip()[:STDERR_PREVIEW_LENGTH_IN_CHARACTERS]}")
+
+## Check that the number of factor records matches expectations.
+##
+## If the test case specifies an expected factor record count ("expect_factor_records")
+## and the actual count differs, marks the test as failed.
+##
+## \param[in,out] test_result - Test result dict to update with pass/fail status and failure messages.
+## \param[in] test_case - Test case definition dict (may contain "expect_factor_records").
+def _validate_factor_record_count(test_result: dict, test_case: dict):
+    # CHECK IF THERE IS AN EXPECTED FACTOR RECORD COUNT.
+    expected_record_count: object = test_case.get("expect_factor_records")
+    has_expected_record_count: bool = expected_record_count is not None
+    if has_expected_record_count:
+        # CHECK IF THE RECORD COUNTS ARE DIFFERENT.
+        actual_record_count: int = test_result["factor_records"]
+        record_counts_differ: bool = actual_record_count != expected_record_count
+        if record_counts_differ:
+            # TRACK THE FAILURE.
+            test_result["passed"] = False
+            test_result["failures"].append(f"Factor records: expected {expected_record_count}, got {actual_record_count}")
+
+## Check the error count from DISPLAY output against expectations.
+##
+## If the test case specifies an expected error count ("expect_error_count")
+## and the parsed error count from stdout differs, marks the test as failed.
+##
+## \param[in,out] test_result - Test result dict to update with pass/fail status and failure messages.
+## \param[in] test_case - Test case definition dict (may contain "expect_error_count").
+def _validate_error_count(test_result: dict, test_case: dict):
+    # CHECK IF THERE IS AN EXPECTED ERROR COUNT.
+    expected_error_count: object = test_case.get("expect_error_count")
+    has_expected_error_count: bool = expected_error_count is not None
+    if has_expected_error_count:
+        # CHECK IF THE ERROR COUNTS ARE DIFFERENT.
+        actual_error_count: object = test_result["counts"].get("error_count")
+        error_counts_differ: bool = actual_error_count != expected_error_count
+        if error_counts_differ:
+            # TRACK THE FAILURE.
+            test_result["passed"] = False
+            test_result["failures"].append(f"Error count: expected {expected_error_count}, got {actual_error_count}")
+
+## Compare actual outputs against saved expected baselines.
+##
+## Checks factor file (binary), print file (text with date masking),
+## stdout content (line-by-line ignoring whitespace), and return code file.
+## Only checks each baseline if the expected file exists; missing baselines
+## are silently skipped (allows incremental baseline generation).
+##
+## \param[in,out] test_result - Test result dict to update with pass/fail status and failure messages.
+## \param[in] expected_directory_path - Path to the directory containing expected baseline files.
+## \param[in] factor_path - Path to the actual factor output file produced by the COBOL program.
+## \param[in] print_path - Path to the actual print output file produced by the COBOL program.
+## \param[in] process_result - The completed process result from running the COBOL executable.
+def _validate_against_expected_baselines(
+    test_result: dict,
+    expected_directory_path: pathlib.Path,
+    factor_path: str,
+    print_path: str,
+    process_result: subprocess.CompletedProcess):
+    # COMPARE THE FACTOR FILE AGAINST THE EXPECTED BASELINE.
+    expected_factor_path: pathlib.Path = expected_directory_path / test_utilities.FACTOR_FILENAME
+    expected_factor_file_exists: bool = expected_factor_path.exists()
+    if expected_factor_file_exists:
+        # CHECK IF TH FACTOR FILES MATCH.
+        factor_files_match: bool = test_utilities.files_match_binary(factor_path, str(expected_factor_path))
+        if not factor_files_match:
+            # TRACK THE FAILURE.
+            test_result["passed"] = False
+            test_result["failures"].append("Factor file does not match expected output")
+
+    # COMPARE THE PRINT FILE AGAINST THE EXPECTED BASELINE.
+    expected_print_path: pathlib.Path = expected_directory_path / test_utilities.PRINT_FILENAME
+    expected_print_file_exists: bool = expected_print_path.exists()
+    if expected_print_file_exists:
+        # CHECK IF THE PRINT FILES MATCH.
+        print_files_match: bool = test_utilities.text_files_match(print_path, str(expected_print_path))
+        if not print_files_match:
+            # TRACK THE FAILURE.
+            test_result["passed"] = False
+            test_result["failures"].append("Print file does not match expected output (ignoring date)")
+
+    # COMPARE STDOUT LINE-BY-LINE AGAINST THE EXPECTED BASELINE.
+    expected_stdout_path: pathlib.Path = expected_directory_path / test_utilities.STDOUT_FILENAME
+    expected_stdout_file_exists: bool = expected_stdout_path.exists()
+    if expected_stdout_file_exists:
+        # READ IN THE EXPECTED TEXT.
+        expected_stdout_text: str = ""
+        with open(expected_stdout_path, "r") as expected_stdout_file:
+            expected_stdout_text = expected_stdout_file.read()
+
+        # CHECK IF THE LINES ARE EQUIVALENT.
+        actual_lines: list[str] = [line.strip() for line in process_result.stdout.splitlines()]
+        expected_lines: list[str] = [line.strip() for line in expected_stdout_text.splitlines()]
+        lines_are_equivalent: bool = actual_lines == expected_lines
+        if not lines_are_equivalent:
+            # TRACK THE FAILURE.
+            test_result["passed"] = False
+            test_result["failures"].append("Stdout does not match expected output")
+
+    # COMPARE THE RETURN CODE AGAINST THE EXPECTED BASELINE.
+    expected_return_code_path: pathlib.Path = expected_directory_path / test_utilities.RETURN_CODE_FILENAME
+    expected_return_code_file_exists: bool = expected_return_code_path.exists()
+    if expected_return_code_file_exists:
+        # READ IN THE EXPECTED RETURN CODE.
+        expected_return_code: int = 0
+        with open(expected_return_code_path, "r") as expected_return_code_file:
+            expected_return_code = int(expected_return_code_file.read().strip())
+
+        # CHECK IF THE RETURN CODES ARE DIFFERENT.
+        return_codes_differ: bool = process_result.returncode != expected_return_code
+        if return_codes_differ:
+            # TRACK THE FAILURE.
+            test_result["passed"] = False
+            test_result["failures"].append(f"Return code: expected {expected_return_code}, got {process_result.returncode}")
+
+# ============================================================================
+# BASELINE GENERATION
+# ============================================================================
+
+## Run all test cases via COBOL executable and save outputs as baselines.
+##
+## Creates or overwrites expected output files (factor.dat, print.dat,
+## stdout.txt, returncode.txt) for each test case. These baselines are
+## used by subsequent test runs for regression comparison.
+##
+## \param[in] verbose - If True, show detailed output for each test case.
+def generate_expected_outputs(verbose: bool = False):
+    # PRINT THE GENERATION BANNER.
+    HEADER_SEPARATOR_CHARACTER: str = "="
+    HEADER_SEPARATOR_CHARACTER_COUNT: int = 70
+    HEADER_SEPARATOR_LINE: str = HEADER_SEPARATOR_CHARACTER * HEADER_SEPARATOR_CHARACTER_COUNT
+    print(HEADER_SEPARATOR_LINE)
     print("GENERATING EXPECTED OUTPUT BASELINES")
-    print("=" * 70)
+    print(HEADER_SEPARATOR_LINE)
     print()
 
-    for test_case in TEST_CASES:
-        name = test_case["name"]
-        input_path = TEST_CASES_DIR / name / INPUT_FILENAME
-        expected_dir = EXPECTED_OUTPUT_DIR / name
+    # RUN EACH TEST CASE AND SAVE THE OUTPUTS AS EXPECTED BASELINES.
+    for test_case in test_utilities.TEST_CASES:
+        # PROVIDE VISIBILITY INTO THE TEST CASE BEING PROCESSED.
+        test_case_name: str = test_case["name"]
+        print(f"  Generating: {test_case_name}...")
 
-        print(f"  Generating: {name}...")
-
-        if not input_path.exists():
-            print(f"    SKIPPED - Input file not found: {input_path}")
+        # SKIP IF THE INPUT CARD FILE DOES NOT EXIST.
+        input_card_file_path: pathlib.Path = test_utilities.g_test_cases_directory_path / test_case_name / test_utilities.INPUT_FILENAME
+        input_card_file_exists: bool = input_card_file_path.exists()
+        if not input_card_file_exists:
+            print(f"    SKIPPED - Input file not found: {input_card_file_path}")
             continue
 
-        # Create expected output directory
-        expected_dir.mkdir(parents=True, exist_ok=True)
-
-        # Create temp output files, then copy to expected
-        tmpdir = tempfile.mkdtemp(prefix=f"clreb020_gen_{name}_")
-        factor_path = os.path.join(tmpdir, FACTOR_FILENAME)
-        print_path = os.path.join(tmpdir, PRINT_FILENAME)
-
+        # EXECUTE THE COBOL PROGRAM IN A TEMPORARY DIRECTORY.
+        # A temporary directory is used to hold some files that will be cleaned up after the test.
+        temporary_directory_path: str = tempfile.mkdtemp(prefix = f"clreb020_gen_{test_case_name}_")
         try:
-            env = os.environ.copy()
-            env["PATH"] = str(BUILD_DIR) + os.pathsep + env.get("PATH", "")
-            env[DD_INPUT_VAR] = str(input_path)
-            env[DD_FACTOR_VAR] = factor_path
-            env[DD_PRINT_VAR] = print_path
+            # BUILD THE ENVIRONMENT FOR RUNNING THE COBOL PROGRAM.
+            process_environment: dict = os.environ.copy()
+            process_environment["PATH"] = str(g_build_directory_path) + os.pathsep + process_environment.get("PATH", "")
+            process_environment[DD_INPUT_ENVIRONMENT_VARIABLE_NAME] = str(input_card_file_path)
+            factor_path: str = os.path.join(temporary_directory_path, test_utilities.FACTOR_FILENAME)
+            process_environment[DD_FACTOR_ENVIRONMENT_VARIABLE_NAME] = factor_path
+            print_path: str = os.path.join(temporary_directory_path, test_utilities.PRINT_FILENAME)
+            process_environment[DD_PRINT_ENVIRONMENT_VARIABLE_NAME] = print_path
 
-            result = subprocess.run(
-                [str(EXE_PATH)],
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=30,
-                cwd=tmpdir,
-            )
+            # RUN THE COBOL EXECUTABLE.
+            process_result: subprocess.CompletedProcess = subprocess.run(
+                [str(g_cobol_executable_path)],
+                env = process_environment,
+                capture_output = True,
+                text = True,
+                timeout = test_utilities.SUBPROCESS_TIMEOUT_IN_SECONDS,
+                cwd = temporary_directory_path,)
 
-            # Save factor file
-            if os.path.exists(factor_path) and os.path.getsize(factor_path) > 0:
-                shutil.copy2(factor_path, str(expected_dir / FACTOR_FILENAME))
-                size = os.path.getsize(factor_path)
-                print(f"    Saved factor.dat ({size} bytes, "
-                      f"{size // FACTOR_RECORD_SIZE} records)")
-            else:
-                # Write an empty file to indicate expected empty output
-                with open(str(expected_dir / FACTOR_FILENAME), "wb") as f:
-                    pass
-                print(f"    Saved factor.dat (0 bytes, empty)")
+            # ENSURE THE EXPECTED OUTPUT DIRECTORY EXISTS.
+            expected_directory_path: pathlib.Path = test_utilities.g_expected_output_directory_path / test_case_name
+            expected_directory_path.mkdir(parents = True, exist_ok = True)
 
-            # Save print file
-            if os.path.exists(print_path) and os.path.getsize(print_path) > 0:
-                shutil.copy2(print_path, str(expected_dir / PRINT_FILENAME))
-                size = os.path.getsize(print_path)
-                print(f"    Saved print.dat ({size} bytes)")
-            else:
-                with open(str(expected_dir / PRINT_FILENAME), "wb") as f:
-                    pass
-                print(f"    Saved print.dat (0 bytes, empty)")
+            # SAVE ALL OUTPUT FILES AS EXPECTED BASELINES.
+            _save_baseline_file(factor_path, expected_directory_path / test_utilities.FACTOR_FILENAME, "factor.dat")
+            _save_baseline_file(print_path, expected_directory_path / test_utilities.PRINT_FILENAME, "print.dat")
 
-            # Save stdout
-            with open(str(expected_dir / STDOUT_FILENAME), "w") as f:
-                f.write(result.stdout)
+            # SAVE THE STDOUT AND RETURN CODE AS BASELINES.
+            with open(str(expected_directory_path / test_utilities.STDOUT_FILENAME), "w") as stdout_file:
+                stdout_file.write(process_result.stdout)
             print(f"    Saved stdout.txt")
 
-            # Save return code
-            with open(str(expected_dir / RETURN_CODE_FILENAME), "w") as f:
-                f.write(str(result.returncode))
-            print(f"    Saved returncode.txt (RC={result.returncode})")
+            with open(str(expected_directory_path / test_utilities.RETURN_CODE_FILENAME), "w") as return_code_file:
+                return_code_file.write(str(process_result.returncode))
+            print(f"    Saved returncode.txt (RC={process_result.returncode})")
 
-            if result.stderr.strip():
-                print(f"    WARNING: stderr: {result.stderr.strip()[:200]}")
+            # WARN IF THE PROCESS PRODUCED STDERR OUTPUT.
+            has_stderr_output: bool = bool(process_result.stderr.strip())
+            if has_stderr_output:
+                print(f"    WARNING: stderr: {process_result.stderr.strip()[:200]}")
 
+            # PRINT VERBOSE DETAILS IF REQUESTED.
             if verbose:
-                print(f"    Stdout: {repr(result.stdout[:200])}")
-                counts = parse_stdout_counts(result.stdout)
-                print(f"    Counts: {counts}")
+                print(f"    Stdout: {repr(process_result.stdout[:200])}")
+                record_counts: dict = test_utilities.parse_stdout_counts(process_result.stdout)
+                print(f"    Counts: {record_counts}")
 
         finally:
+            # CLEAN UP THE TEMPORARY DIRECTORY.
             try:
-                shutil.rmtree(tmpdir)
+                shutil.rmtree(temporary_directory_path)
             except OSError:
                 pass
 
         print()
 
+    # PRINT THE COMPLETION BANNER.
     print("Expected output generation complete.")
     print()
 
+## Copy an output file to the expected baselines directory.
+##
+## If the source file exists and is non-empty, copies it. Otherwise,
+## creates an empty file to indicate that empty output is expected.
+##
+## \param[in] source_path - Path to the output file produced by the test run.
+## \param[in] destination_path - Path where the baseline file should be saved.
+## \param[in] display_name - Human-readable filename shown in progress messages (e.g., "factor.dat").
+def _save_baseline_file(source_path: str, destination_path: pathlib.Path, display_name: str):
+    # CHECK IF THE SOURCE FILE HAS CONTENT.
+    source_file_has_content: bool = os.path.exists(source_path) and os.path.getsize(source_path) > 0
+    if source_file_has_content:
+        # COPY THE SOURCE FILE TO THE DESTINATION PATH.
+        shutil.copy2(source_path, str(destination_path))
 
-def run_all_tests(verbose=False):
-    """Run all test cases and report results."""
-    print("=" * 70)
+        # GET THE SIZE OF THE SOURCE FILE IN BYTES.
+        file_size_in_bytes: int = os.path.getsize(source_path)
+
+        # CHECK IF THIS IS THE FACTOR FILE OR ANOTHER FILE.
+        is_factor_file: bool = display_name == test_utilities.FACTOR_FILENAME
+        if is_factor_file:
+            # CALCULATE THE RECORD COUNT.
+            record_count: int = file_size_in_bytes // test_utilities.FACTOR_RECORD_SIZE_IN_BYTES
+            print(f"    Saved {display_name} ({file_size_in_bytes} bytes, {record_count} records)")
+        else:
+            # JUST DISPLAY THE FILE SIZE.
+            print(f"    Saved {display_name} ({file_size_in_bytes} bytes)")
+    else:
+        # CREATE AN EMPTY FILE TO INDICATE THAT THE FILE IS EMPTY.
+        with open(str(destination_path), "wb"):
+            pass
+        print(f"    Saved {display_name} (0 bytes, empty)")
+
+# ============================================================================
+# TEST SUITE RUNNER
+# ============================================================================
+
+## Run all 50 test cases and print a summary report.
+##
+## \param[in] verbose - If True, show detailed output for each test case.
+## \return 0 if all tests passed, 1 if any test failed.
+def run_all_tests(verbose: bool = False) -> int:
+    # PRINT THE HARNESS BANNER.
+    HEADER_SEPARATOR_CHARACTER: str = "="
+    HEADER_SEPARATOR_CHARACTER_COUNT: int = 70
+    HEADER_SEPARATOR_LINE: str = HEADER_SEPARATOR_CHARACTER * HEADER_SEPARATOR_CHARACTER_COUNT
+    print(HEADER_SEPARATOR_LINE)
     print("CLREB020 COBOL TEST HARNESS")
-    print("=" * 70)
+    print(HEADER_SEPARATOR_LINE)
     print()
-    print(f"Executable:    {EXE_PATH}")
-    print(f"Test cases:    {TEST_CASES_DIR}")
-    print(f"Expected dir:  {EXPECTED_OUTPUT_DIR}")
-    print(f"Build DLLs:    {BUILD_DIR}")
+    print(f"Executable:    {g_cobol_executable_path}")
+    print(f"Test cases:    {test_utilities.g_test_cases_directory_path}")
+    print(f"Expected dir:  {test_utilities.g_expected_output_directory_path}")
+    print(f"Build DLLs:    {g_build_directory_path}")
     print()
 
-    # Verify executable exists
-    if not EXE_PATH.exists():
-        print(f"ERROR: Executable not found: {EXE_PATH}")
+    # VERIFY THAT THE COBOL EXECUTABLE EXISTS.
+    ERROR_EXIT_CODE: int = 1
+    cobol_executable_exists: bool = g_cobol_executable_path.exists()
+    if not cobol_executable_exists:
+        print(f"ERROR: Executable not found: {g_cobol_executable_path}")
         print("Please build CLREB020.exe first.")
-        sys.exit(1)
+        return ERROR_EXIT_CODE
 
-    # Check if expected outputs exist
-    has_expected = any(
-        (EXPECTED_OUTPUT_DIR / tc["name"] / FACTOR_FILENAME).exists()
-        for tc in TEST_CASES
+    # CHECK WHETHER EXPECTED BASELINES EXIST.
+    has_expected_baselines: bool = any(
+        (test_utilities.g_expected_output_directory_path / test_case["name"] / test_utilities.FACTOR_FILENAME).exists()
+        for test_case in test_utilities.TEST_CASES
     )
-    if not has_expected:
+    if not has_expected_baselines:
         print("WARNING: No expected output files found.")
         print("Run with --generate-expected to create baselines first.")
         print()
 
-    total = len(TEST_CASES)
-    passed = 0
-    failed = 0
-    errors = []
+    # RUN EACH TEST CASE AND ACCUMULATE RESULTS.
+    total_test_count: int = len(test_utilities.TEST_CASES)
+    passed_count: int = 0
+    failed_count: int = 0
+    failure_details: list[tuple[str, list[str]]] = []
 
-    print("-" * 70)
+    MINOR_SEPARATOR_CHARACTER: str = "-"
+    MINOR_SEPARATOR_LINE: str = MINOR_SEPARATOR_CHARACTER * HEADER_SEPARATOR_CHARACTER_COUNT
+    print(MINOR_SEPARATOR_LINE)
 
-    for test_case in TEST_CASES:
-        name = test_case["name"]
-        desc = test_case["description"]
+    for test_case in test_utilities.TEST_CASES:
+        # RUN THE TEST CASE.
+        test_case_name: str = test_case["name"]
+        test_case_description: str = test_case["description"]
+        test_case_result: dict = run_test(test_case, verbose = verbose)
 
-        result = run_test(test_case, verbose=verbose)
-
-        if result["passed"]:
-            status = "PASS"
-            passed += 1
+        # CHECK IF THE TEST PASSED OR FAILED.
+        if test_case_result["passed"]:
+            status: str = "PASS"
+            passed_count += 1
         else:
             status = "FAIL"
-            failed += 1
-            errors.append((name, result["failures"]))
+            failed_count += 1
+            failure_details.append((test_case_name, test_case_result["failures"]))
 
-        # Format output line
-        rc_str = f"RC={result['return_code']}" if result["return_code"] is not None else "RC=?"
-        counts = result["counts"]
-        count_str = ""
-        if counts.get("input_count") is not None:
-            count_str = (
-                f"in={counts['input_count']} "
-                f"out={counts.get('output_count', '?')} "
-                f"err={counts.get('error_count', '?')}"
+        # FORMAT THE RETURN CODE AND COUNTS FOR DISPLAY.
+        return_code_display: str = (
+            f"RC={test_case_result['return_code']}"
+            if test_case_result["return_code"] is not None
+            else "RC=?"
+        )
+        record_counts: dict = test_case_result["counts"]
+        counts_display: str = ""
+        has_input_count: bool = record_counts.get("input_count") is not None
+        if has_input_count:
+            counts_display = (
+                f"in={record_counts['input_count']} "
+                f"out={record_counts.get('output_count', '?')} "
+                f"err={record_counts.get('error_count', '?')}"
             )
 
-        print(f"  [{status}] {name:<25} {rc_str:<8} {count_str}")
+        # PRINT THE OVERALL SUMMARY FOR THIS TEST.
+        print(f"  [{status}] {test_case_name:<25} {return_code_display:<8} {counts_display}")
 
+        # PRINT VERBOSE DETAILS IF REQUESTED.
         if verbose:
-            print(f"         {desc}")
-            if result["stdout"]:
-                for line in result["stdout"].strip().splitlines():
+            print(f"         {test_case_description}")
+
+            # Standard output should be printed if available.
+            has_stdout: bool = bool(test_case_result["stdout"])
+            if has_stdout:
+                # PRINT EACH LINE OF THE STANDARD OUTPUT.
+                standard_output_lines: list[str] = test_case_result["stdout"].strip().splitlines()
+                for line in standard_output_lines:
                     print(f"         stdout: {line}")
-            if result["stderr"]:
-                for line in result["stderr"].strip().splitlines():
+
+            # Standard error should be printed if available.
+            has_stderr: bool = bool(test_case_result["stderr"])
+            if has_stderr:
+                # PRINT EACH LINE OF THE STANDARD ERROR.
+                standard_error_lines: list[str] = test_case_result["stderr"].strip().splitlines()
+                for line in standard_error_lines:
                     print(f"         stderr: {line}")
-            if result["failures"]:
-                for failure in result["failures"]:
+
+            # Failures should be printed if any exist.
+            has_failures: bool = bool(test_case_result["failures"])
+            if has_failures:
+                # PRINT EACH FAILURE.
+                for failure in test_case_result["failures"]:
                     print(f"         FAILURE: {failure}")
             print()
 
-    print("-" * 70)
+    # PRINT THE SUMMARY REPORT.
+    print(MINOR_SEPARATOR_LINE)
     print()
-    print(f"Results: {passed} passed, {failed} failed, {total} total")
+    print(f"Results: {passed_count} passed, {failed_count} failed, {total_test_count} total")
     print()
 
-    if errors:
+    # PRINT FAILURE DETAILS IF ANY TESTS FAILED.
+    if failure_details:
+        # PRINT THE FAILURE DETAILS.
         print("FAILURES:")
         print()
-        for name, failures in errors:
-            print(f"  {name}:")
+        for test_case_name, failures in failure_details:
+            # PRINT FAILURES FOR THE CURRENT TEST CASE.
+            print(f"  {test_case_name}:")
             for failure in failures:
                 print(f"    - {failure}")
             print()
 
-    return 0 if failed == 0 else 1
-
+    # RETURN THE APPROPRIATE EXIT CODE.
+    SUCCESS_EXIT_CODE: int = 0
+    exit_code: int = SUCCESS_EXIT_CODE if failed_count == 0 else ERROR_EXIT_CODE
+    return exit_code
 
 # ============================================================================
-# Main Entry Point
+# MAIN ENTRY POINT
 # ============================================================================
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="COBOL Test Harness for CLREB020 - Equalization Factor Editor"
-    )
-    parser.add_argument(
+## Parse command-line arguments and run the COBOL test harness.
+##
+## \return Exit code (0 if all tests passed, 1 if any test failed).
+def main() -> int:
+    # PARSE THE COMMAND LINE ARGUMENTS.
+    command_line_argument_parser: argparse.ArgumentParser = argparse.ArgumentParser(
+        description = "COBOL Test Harness for CLREB020 - Equalization Factor Editor")
+    command_line_argument_parser.add_argument(
         "--generate-expected",
-        action="store_true",
-        help="Run all tests and save outputs as expected baselines",
-    )
-    parser.add_argument(
+        action = "store_true",
+        help = "Run all tests and save outputs as expected baselines")
+    command_line_argument_parser.add_argument(
         "--verbose", "-v",
-        action="store_true",
-        help="Show detailed output for each test case",
-    )
-    args = parser.parse_args()
+        action = "store_true",
+        help = "Show detailed output for each test case")
+    command_line_arguments: argparse.Namespace = command_line_argument_parser.parse_args()
 
-    if args.generate_expected:
-        generate_expected_outputs(verbose=args.verbose)
-        # Also run the tests after generating to show current status
+    # GENERATE EXPECTED BASELINES IF REQUESTED.
+    if command_line_arguments.generate_expected:
+        generate_expected_outputs(verbose = command_line_arguments.verbose)
         print()
 
-    exit_code = run_all_tests(verbose=args.verbose)
-    sys.exit(exit_code)
-
+    # RUN ALL TESTS AND RETURN THE EXIT CODE.
+    exit_code: int = run_all_tests(verbose = command_line_arguments.verbose)
+    return exit_code
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

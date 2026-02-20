@@ -1,22 +1,20 @@
 #!/usr/bin/env python3
-"""
-Java Test Harness for CLREB020 - Equalization Factor Edit and List Program
-
-Runs the Java conversion (tax-extension JAR) against the full test suite and
-validates outputs against Java-specific expected baselines.
-
-This is the Java-side equivalent of cobol_test_harness.py. It tests the Java
-implementation independently, without needing the COBOL executable.
-
-Usage:
-    python Testing/CLREB020/java_test_harness.py [--generate-expected] [--verbose]
-
-Previously Known COBOL/Java Differences (now resolved):
-    - invalid_zero_factor and boundary_year_00 previously differed because Java
-      used numeric > 0 comparison while COBOL uses alphanumeric comparison.
-    - Fixed by changing Java validation to use >= 0 (COBOL-compatible default).
-    - The Java-specific baselines (expected_output_java/) are no longer needed.
-"""
+## \file java_test_harness.py
+## Java Test Harness for CLREB020 - Equalization Factor Edit and List Program.
+##
+## Runs the Java conversion (tax-extension JAR) against the full test suite and
+## validates outputs against expected baselines. This is the Java-side equivalent
+## of cobol_test_harness.py, testing the Java implementation independently without
+## needing the COBOL executable.
+##
+## Usage:
+##     python Testing/CLREB020/java_test_harness.py [--generate-expected] [--verbose]
+##
+## Previously Known COBOL/Java Differences (now resolved):
+##     - invalid_zero_factor and boundary_year_00 previously differed because Java
+##       used numeric > 0 comparison while COBOL uses alphanumeric comparison.
+##     - Fixed by changing Java validation to use >= 0 (COBOL-compatible default).
+##     - The Java-specific baselines (expected_output_java/) are no longer needed.
 
 import os
 import sys
@@ -24,201 +22,91 @@ import subprocess
 import tempfile
 import shutil
 import argparse
-from pathlib import Path
+import pathlib
 
-
-# ============================================================================
-# Configuration
-# ============================================================================
-
-SCRIPT_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = SCRIPT_DIR.parent.parent
-
-JAVA_DIR = PROJECT_ROOT / "tax_extension_java"
-JAVA_JAR = JAVA_DIR / "target" / "tax-extension-0.1.0-SNAPSHOT.jar"
-TEST_CASES_DIR = SCRIPT_DIR / "test_cases"
-EXPECTED_OUTPUT_DIR = SCRIPT_DIR / "expected_output"
-EXPECTED_OUTPUT_JAVA_DIR = SCRIPT_DIR / "expected_output_java"
-
-# File names within each test case directory
-INPUT_FILENAME = "input.dat"
-FACTOR_FILENAME = "factor.dat"
-PRINT_FILENAME = "print.dat"
-STDOUT_FILENAME = "stdout.txt"
-RETURN_CODE_FILENAME = "returncode.txt"
-
-FACTOR_RECORD_SIZE = 21
-
-# Tests with known COBOL/Java behavioral differences.
-# These use expected_output_java/ instead of expected_output/.
-JAVA_SPECIFIC_TESTS = {
-}
-
+import test_utilities
 
 # ============================================================================
-# Test Case Definitions (same 50 tests as COBOL harness, with Java expectations)
+# JAVA-SPECIFIC CONFIGURATION
 # ============================================================================
-
-TEST_CASES = [
-    # === Existing Tests (1-7) ===
-    {"name": "valid_basic", "description": "4 valid cards", "expect_rc": 0, "expect_factor_records": 4, "expect_error_count": 0},
-    {"name": "valid_multipage", "description": "64 valid cards, page breaks", "expect_rc": 0, "expect_factor_records": 64, "expect_error_count": 0},
-    {"name": "invalid_not_numeric", "description": "Non-numeric year and factor", "expect_rc": 0, "expect_factor_records": 0, "expect_error_count": 2},
-    {"name": "invalid_bad_quad", "description": "Quad = '5'", "expect_rc": 0, "expect_factor_records": 0, "expect_error_count": 1},
-    {"name": "invalid_zero_factor", "description": "Factor '00000' accepted (COBOL-compatible)", "expect_rc": 0, "expect_factor_records": 1, "expect_error_count": 0},
-    {"name": "sequence_error", "description": "Descending order (RC=16)", "expect_rc": 16, "expect_factor_records": 1, "expect_error_count": 0},
-    {"name": "empty_input", "description": "Empty file", "expect_rc": 0, "expect_factor_records": 0, "expect_error_count": 0},
-    # === Field Boundary Tests (8-17) ===
-    {"name": "boundary_year_01", "description": "Year '01'", "expect_rc": 0, "expect_factor_records": 1, "expect_error_count": 0},
-    {"name": "boundary_year_99", "description": "Year '99'", "expect_rc": 0, "expect_factor_records": 1, "expect_error_count": 0},
-    {"name": "boundary_year_00", "description": "Year '00' accepted (COBOL-compatible)", "expect_rc": 0, "expect_factor_records": 1, "expect_error_count": 0},
-    {"name": "boundary_quad_1", "description": "Quad '1'", "expect_rc": 0, "expect_factor_records": 1, "expect_error_count": 0},
-    {"name": "boundary_quad_4", "description": "Quad '4'", "expect_rc": 0, "expect_factor_records": 1, "expect_error_count": 0},
-    {"name": "boundary_quad_0", "description": "Quad '0' invalid", "expect_rc": 0, "expect_factor_records": 0, "expect_error_count": 1},
-    {"name": "boundary_quad_5", "description": "Quad '5' invalid", "expect_rc": 0, "expect_factor_records": 0, "expect_error_count": 1},
-    {"name": "boundary_factor_00001", "description": "Factor '00001'", "expect_rc": 0, "expect_factor_records": 1, "expect_error_count": 0},
-    {"name": "boundary_factor_99999", "description": "Factor '99999'", "expect_rc": 0, "expect_factor_records": 1, "expect_error_count": 0},
-    {"name": "boundary_factor_10000", "description": "Factor '10000' = 1.0", "expect_rc": 0, "expect_factor_records": 1, "expect_error_count": 0},
-    # === Validation Combinatorial Tests (18-26) ===
-    {"name": "invalid_year_letters", "description": "Year 'AB'", "expect_rc": 0, "expect_factor_records": 0, "expect_error_count": 1},
-    {"name": "invalid_year_mixed", "description": "Year '2A'", "expect_rc": 0, "expect_factor_records": 0, "expect_error_count": 1},
-    {"name": "invalid_year_spaces", "description": "Year '  '", "expect_rc": 0, "expect_factor_records": 0, "expect_error_count": 1},
-    {"name": "invalid_factor_mixed", "description": "Factor '29A44'", "expect_rc": 0, "expect_factor_records": 0, "expect_error_count": 1},
-    {"name": "invalid_factor_spaces", "description": "Factor '2 744'", "expect_rc": 0, "expect_factor_records": 0, "expect_error_count": 1},
-    {"name": "invalid_quad_9", "description": "Quad '9'", "expect_rc": 0, "expect_factor_records": 0, "expect_error_count": 1},
-    {"name": "invalid_quad_space", "description": "Quad ' '", "expect_rc": 0, "expect_factor_records": 0, "expect_error_count": 1},
-    {"name": "invalid_quad_letter", "description": "Quad 'A'", "expect_rc": 0, "expect_factor_records": 0, "expect_error_count": 1},
-    {"name": "invalid_all_fields_bad", "description": "All fields invalid", "expect_rc": 0, "expect_factor_records": 0, "expect_error_count": 1},
-    # === Sequence Tests (27-31) ===
-    {"name": "sequence_ascending_all_quads", "description": "8 cards ascending", "expect_rc": 0, "expect_factor_records": 8, "expect_error_count": 0},
-    {"name": "sequence_year_transition", "description": "Year boundary", "expect_rc": 0, "expect_factor_records": 5, "expect_error_count": 0},
-    {"name": "sequence_duplicate_key", "description": "Duplicate key allowed", "expect_rc": 0, "expect_factor_records": 3, "expect_error_count": 0},
-    {"name": "sequence_error_after_valid", "description": "Seq error after valid", "expect_rc": 16, "expect_factor_records": 2, "expect_error_count": 0},
-    {"name": "sequence_error_immediate", "description": "Immediate seq error", "expect_rc": 16, "expect_factor_records": 1, "expect_error_count": 0},
-    # === Data-Flow and State Tests (32-34) ===
-    {"name": "mixed_valid_invalid_stream", "description": "V,I,V,I,V,V", "expect_rc": 0, "expect_factor_records": 4, "expect_error_count": 2},
-    {"name": "error_message_cleanup", "description": "V-I-V cleanup", "expect_rc": 0, "expect_factor_records": 2, "expect_error_count": 1},
-    {"name": "counter_invariant", "description": "10 cards 7V+3I", "expect_rc": 0, "expect_factor_records": 7, "expect_error_count": 3},
-    # === Page Break Tests (35-39) ===
-    {"name": "page_break_at_23_cards", "description": "23 cards", "expect_rc": 0, "expect_factor_records": 23, "expect_error_count": 0},
-    {"name": "page_break_at_24_cards", "description": "24 cards, page break", "expect_rc": 0, "expect_factor_records": 24, "expect_error_count": 0},
-    {"name": "page_break_at_25_cards", "description": "25 cards", "expect_rc": 0, "expect_factor_records": 25, "expect_error_count": 0},
-    {"name": "page_break_three_pages", "description": "72 cards, 3+ pages", "expect_rc": 0, "expect_factor_records": 72, "expect_error_count": 0},
-    {"name": "page_break_with_errors", "description": "30 cards 25V+5I", "expect_rc": 0, "expect_factor_records": 25, "expect_error_count": 5},
-    # === Business Scenario Tests (40-43) ===
-    {"name": "business_annual_run", "description": "Annual run", "expect_rc": 0, "expect_factor_records": 4, "expect_error_count": 0},
-    {"name": "business_multi_year", "description": "3 years", "expect_rc": 0, "expect_factor_records": 12, "expect_error_count": 0},
-    {"name": "business_data_entry_error", "description": "Typo in data", "expect_rc": 0, "expect_factor_records": 4, "expect_error_count": 1},
-    {"name": "business_factor_unity", "description": "Factor 1.0", "expect_rc": 0, "expect_factor_records": 1, "expect_error_count": 0},
-    # === Output Format Tests (44-48) ===
-    {"name": "factor_record_exact_bytes", "description": "Byte-level factor", "expect_rc": 0, "expect_factor_records": 4, "expect_error_count": 0},
-    {"name": "print_detail_exact_layout", "description": "Print layout", "expect_rc": 0, "expect_factor_records": 1, "expect_error_count": 0},
-    {"name": "print_header_exact_layout", "description": "Header layout", "expect_rc": 0, "expect_factor_records": 1, "expect_error_count": 0},
-    {"name": "print_error_line_layout", "description": "Error line", "expect_rc": 0, "expect_factor_records": 0, "expect_error_count": 1},
-    {"name": "factor_display_formatting", "description": "N.NNNN display", "expect_rc": 0, "expect_factor_records": 5, "expect_error_count": 0},
-    # === Single-Card Edge Cases (49-50) ===
-    {"name": "single_valid_card", "description": "1 valid card", "expect_rc": 0, "expect_factor_records": 1, "expect_error_count": 0},
-    {"name": "single_invalid_card", "description": "1 invalid card", "expect_rc": 0, "expect_factor_records": 0, "expect_error_count": 1},
-]
-
+## Root directory of the Java tax extension project.
+g_java_project_directory_path: pathlib.Path = test_utilities.g_project_root_absolute_path / "tax_extension_java"
+## Path to the compiled tax-extension JAR file.
+g_java_jar_path: pathlib.Path = g_java_project_directory_path / "target" / "tax-extension-0.1.0-SNAPSHOT.jar"
+## Alternate baseline directory for tests with known COBOL/Java differences.
+## Currently unused — all differences have been resolved, so every test uses
+## the shared expected_output/ baselines.
+g_expected_output_java_directory_path: pathlib.Path = test_utilities.g_test_harness_directory_absolute_path / "expected_output_java"
+## Tests with known COBOL/Java behavioral differences.
+## These use expected_output_java/ instead of expected_output/.
+## Currently empty: all behavioral differences have been resolved.
+JAVA_SPECIFIC_TESTS: dict[str, str] = {}
 
 # ============================================================================
-# Helper Functions
+# JAVA-SPECIFIC HELPERS
 # ============================================================================
 
-def parse_stdout_counts(stdout_text):
-    """Parse DISPLAY output to extract counts."""
-    counts = {"input_count": None, "output_count": None, "error_count": None}
-    for line in stdout_text.splitlines():
-        line = line.strip()
-        if "INPUT RECORDS" in line and "=" in line:
-            try:
-                val = line.split("=")[1].strip().lstrip("+")
-                counts["input_count"] = int(val)
-            except (ValueError, IndexError):
-                pass
-        elif "OUTPUT RECORDS" in line and "=" in line:
-            try:
-                val = line.split("=")[1].strip().lstrip("+")
-                counts["output_count"] = int(val)
-            except (ValueError, IndexError):
-                pass
-        elif "ERROR RECORDS" in line and "=" in line:
-            try:
-                val = line.split("=")[1].strip().lstrip("+")
-                counts["error_count"] = int(val)
-            except (ValueError, IndexError):
-                pass
-    return counts
-
-
-def count_factor_records(factor_file_path):
-    """Count 21-byte records in factor file."""
-    if not os.path.exists(factor_file_path):
-        return 0
-    size = os.path.getsize(factor_file_path)
-    if size == 0:
-        return 0
-    if size % FACTOR_RECORD_SIZE != 0:
-        return -1
-    return size // FACTOR_RECORD_SIZE
-
-
-def files_match(file1, file2):
-    """Compare two files byte-for-byte."""
-    if not os.path.exists(file1) and not os.path.exists(file2):
-        return True
-    if not os.path.exists(file1) or not os.path.exists(file2):
-        existing = file1 if os.path.exists(file1) else file2
-        return os.path.getsize(existing) == 0
-    with open(file1, "rb") as f1, open(file2, "rb") as f2:
-        return f1.read() == f2.read()
-
-
-def text_files_match(file1, file2):
-    """Compare print files, masking the date line."""
-    def normalize_print_content(filepath):
-        if not os.path.exists(filepath):
-            return ""
-        with open(filepath, "r", errors="replace") as f:
-            lines = f.readlines()
-        normalized = []
-        for line in lines:
-            stripped = line.rstrip()
-            if stripped and stripped[0] == "\x0c" and len(stripped) >= 20:
-                normalized.append(stripped[:12] + "XXXXXXXX" + stripped[20:])
-            else:
-                normalized.append(stripped)
-        return "\n".join(normalized)
-
-    return normalize_print_content(file1) == normalize_print_content(file2)
-
-
-def get_expected_dir(test_name):
-    """Return the correct expected output directory for this test.
-
-    Tests with known COBOL/Java differences use expected_output_java/.
-    All others use expected_output/ (same baselines as COBOL).
-    """
-    if test_name in JAVA_SPECIFIC_TESTS:
-        java_dir = EXPECTED_OUTPUT_JAVA_DIR / test_name
-        if java_dir.exists():
-            return java_dir
-    return EXPECTED_OUTPUT_DIR / test_name
-
+## Return the correct expected-output directory for a given test.
+##
+## Tests listed in JAVA_SPECIFIC_TESTS use Java-specific baselines from
+## expected_output_java/. All others use the shared COBOL baselines from
+## expected_output/. This allows the Java harness to share baselines with
+## the COBOL harness for identical-behavior tests while maintaining separate
+## baselines where the two implementations intentionally diverge.
+##
+## \param[in] test_name - Name of the test case.
+## \return Path to the expected output directory.
+def get_expected_directory(test_name: str) -> pathlib.Path:
+    # CHECK WHETHER THIS TEST HAS JAVA-SPECIFIC BASELINES.
+    is_java_specific_test: bool = test_name in JAVA_SPECIFIC_TESTS
+    if is_java_specific_test:
+        # CHECK IF THE JAVA-SPECIFIC DIRECTORY EXISTS.
+        java_specific_directory_path: pathlib.Path = g_expected_output_java_directory_path / test_name
+        java_specific_directory_exists: bool = java_specific_directory_path.exists()
+        if java_specific_directory_exists:
+            # RETURN THE JAVA-SPECIFIC DIRECTORY.
+            return java_specific_directory_path
+    
+    # RETURN THE GENERIC EXPECTED OUTPUT DIRECTORY.
+    generic_expected_directory_path: pathlib.Path = test_utilities.g_expected_output_directory_path / test_name
+    return generic_expected_directory_path
 
 # ============================================================================
-# Test Runner
+# TEST RUNNER
 # ============================================================================
 
-def run_test(test_case, verbose=False):
-    """Run a single test case via Java JAR."""
-    name = test_case["name"]
-    input_path = TEST_CASES_DIR / name / INPUT_FILENAME
-    expected_dir = get_expected_dir(name)
-    is_java_specific = name in JAVA_SPECIFIC_TESTS
-
-    results = {
+## Run a single test case via the Java JAR and validate outputs.
+##
+## Executes the tax-extension JAR with input/output file paths as command-line
+## arguments (unlike the COBOL harness which uses DD environment variables).
+## Validates return code, stderr, factor record count, error count, and
+## compares outputs against expected baselines.
+##
+## Stdout comparison is semantic rather than textual: COBOL formats counts as
+## "+004" (COMP-3 DISPLAY) while Java writes plain "4". Both are parsed to
+## integers for comparison.
+##
+## \param[in] test_case - Test case definition dict containing:
+##     - "name" (str): Test case directory name under test_cases/.
+##     - "description" (str): Human-readable summary of what the test covers.
+##     - "expect_rc" (int or None): Expected process return code, if any.
+##     - "expect_factor_records" (int or None): Expected number of factor records, if any.
+##     - "expect_error_count" (int or None): Expected error count from DISPLAY output, if any.
+## \param[in] verbose - If True, show detailed output for the test case.
+## \return Result dict containing:
+##     - "passed" (bool): True if all validations succeeded.
+##     - "failures" (list[str]): Human-readable descriptions of each validation failure.
+##     - "return_code" (int or None): Process exit code, None if the process did not run.
+##     - "stdout" (str): Captured standard output text from the process.
+##     - "stderr" (str): Captured standard error text from the process.
+##     - "factor_records" (int): Number of 21-byte factor records in the output file.
+##     - "counts" (dict): Parsed record counts from DISPLAY output (input_count, output_count, error_count).
+##     - "java_specific" (bool): True if this test uses Java-specific baselines.
+def run_test(test_case: dict, verbose: bool = False) -> dict:
+    # INITIALIZE THE TEST RESULT.
+    name: str = test_case["name"]
+    is_java_specific: bool = name in JAVA_SPECIFIC_TESTS
+    test_result: dict = {
         "passed": True,
         "failures": [],
         "return_code": None,
@@ -229,328 +117,559 @@ def run_test(test_case, verbose=False):
         "java_specific": is_java_specific,
     }
 
-    if not input_path.exists():
-        results["passed"] = False
-        results["failures"].append(f"Input file not found: {input_path}")
-        return results
+    # CHECK THAT THE INPUT CARD FILE EXISTS.
+    input_card_file_path: pathlib.Path = test_utilities.g_test_cases_directory_path / name / test_utilities.INPUT_FILENAME
+    input_card_file_exists: bool = input_card_file_path.exists()
+    if not input_card_file_exists:
+        # INDICATE THAT THE TEST FAILED BECAUSE THE INPUT CARD FILE WAS NOT FOUND.
+        test_result["passed"] = False
+        test_result["failures"].append(f"Input file not found: {input_card_file_path}")
+        return test_result
 
-    tmpdir = tempfile.mkdtemp(prefix=f"clreb020_java_{name}_")
-    factor_path = os.path.join(tmpdir, FACTOR_FILENAME)
-    print_path = os.path.join(tmpdir, PRINT_FILENAME)
-
+    # EXECUTE THE JAVA PROGRAM IN A TEMPORARY DIRECTORY.
+    # A temporary directory is used to hold some files that will be cleaned up after the test.
+    temporary_directory_path: str = tempfile.mkdtemp(prefix = f"clreb020_java_{name}_")
     try:
+        # RUN THE JAVA JAR WITH INPUT AND OUTPUT FILE PATHS.
         try:
-            result = subprocess.run(
-                ["java", "-jar", str(JAVA_JAR),
-                 str(input_path), print_path, factor_path],
-                capture_output=True,
-                text=True,
-                timeout=30,
-                cwd=tmpdir,
-            )
+            factor_path: str = os.path.join(temporary_directory_path, test_utilities.FACTOR_FILENAME)
+            print_path: str = os.path.join(temporary_directory_path, test_utilities.PRINT_FILENAME)
+            process_result: subprocess.CompletedProcess = subprocess.run(
+                [
+                    "java", "-jar", str(g_java_jar_path),
+                    str(input_card_file_path), print_path, factor_path,
+                ],
+                capture_output = True,
+                text = True,
+                timeout = test_utilities.SUBPROCESS_TIMEOUT_IN_SECONDS,
+                cwd = temporary_directory_path)
         except subprocess.TimeoutExpired:
-            results["passed"] = False
-            results["failures"].append("Execution timed out (30 seconds)")
-            return results
+            test_result["passed"] = False
+            test_result["failures"].append(f"Execution timed out ({test_utilities.SUBPROCESS_TIMEOUT_IN_SECONDS} seconds)")
+            return test_result
         except FileNotFoundError:
-            results["passed"] = False
-            results["failures"].append("Java runtime (java) not found")
-            return results
+            test_result["passed"] = False
+            test_result["failures"].append("Java runtime (java) not found")
+            return test_result
 
-        results["return_code"] = result.returncode
-        results["stdout"] = result.stdout
-        results["stderr"] = result.stderr
-        results["counts"] = parse_stdout_counts(result.stdout)
-        results["factor_records"] = count_factor_records(factor_path)
+        # STORE THE PROCESS RESULTS.
+        test_result["return_code"] = process_result.returncode
+        test_result["stdout"] = process_result.stdout
+        test_result["stderr"] = process_result.stderr
+        test_result["counts"] = test_utilities.parse_stdout_counts(process_result.stdout)
+        test_result["factor_records"] = test_utilities.count_factor_records(factor_path)
 
-        # 1. Check return code
-        if test_case.get("expect_rc") is not None:
-            if result.returncode != test_case["expect_rc"]:
-                results["passed"] = False
-                results["failures"].append(
-                    f"Return code: expected {test_case['expect_rc']}, got {result.returncode}")
-
-        # 2. Check stderr
-        if result.stderr.strip():
-            results["passed"] = False
-            results["failures"].append(f"Unexpected stderr: {result.stderr.strip()[:200]}")
-
-        # 3. Check factor record count
-        if test_case.get("expect_factor_records") is not None:
-            actual = results["factor_records"]
-            expected = test_case["expect_factor_records"]
-            if actual != expected:
-                results["passed"] = False
-                results["failures"].append(f"Factor records: expected {expected}, got {actual}")
-
-        # 4. Check error count
-        if test_case.get("expect_error_count") is not None:
-            actual = results["counts"].get("error_count")
-            expected = test_case["expect_error_count"]
-            if actual != expected:
-                results["passed"] = False
-                results["failures"].append(f"Error count: expected {expected}, got {actual}")
-
-        # 5. Compare against expected output files
-        expected_factor = expected_dir / FACTOR_FILENAME
-        expected_print = expected_dir / PRINT_FILENAME
-        expected_stdout = expected_dir / STDOUT_FILENAME
-        expected_rc_file = expected_dir / RETURN_CODE_FILENAME
-
-        if expected_factor.exists():
-            if not files_match(factor_path, str(expected_factor)):
-                results["passed"] = False
-                results["failures"].append("Factor file does not match expected output")
-
-        if expected_print.exists():
-            if not text_files_match(print_path, str(expected_print)):
-                results["passed"] = False
-                results["failures"].append("Print file does not match expected output (ignoring date)")
-
-        if expected_stdout.exists():
-            with open(expected_stdout, "r") as f:
-                expected_stdout_text = f.read()
-            # Compare stdout semantically: COBOL uses COMP-3 sign format
-            # (e.g., "+004") while Java uses plain int (e.g., "4").
-            # Parse counts from both and compare numeric values.
-            expected_counts = parse_stdout_counts(expected_stdout_text)
-            actual_counts = results["counts"]
-            for key in ["input_count", "output_count", "error_count"]:
-                exp_val = expected_counts.get(key)
-                act_val = actual_counts.get(key)
-                if exp_val is not None and act_val is not None:
-                    if exp_val != act_val:
-                        results["passed"] = False
-                        results["failures"].append(
-                            f"Stdout {key}: expected {exp_val}, got {act_val}")
-                elif exp_val is not None and act_val is None:
-                    results["passed"] = False
-                    results["failures"].append(f"Stdout missing {key}")
-            # For sequence error tests, verify diagnostic messages are present
-            if "CARDS OUT OF SEQUENCE" in expected_stdout_text:
-                if "CARDS OUT OF SEQUENCE" not in result.stdout:
-                    results["passed"] = False
-                    results["failures"].append(
-                        "Stdout missing 'CARDS OUT OF SEQUENCE' message")
-                if "CURRENT CARD" in expected_stdout_text:
-                    if "CURRENT CARD" not in result.stdout:
-                        results["passed"] = False
-                        results["failures"].append(
-                            "Stdout missing 'CURRENT CARD' message")
-
-        if expected_rc_file.exists():
-            with open(expected_rc_file, "r") as f:
-                expected_rc = int(f.read().strip())
-            if result.returncode != expected_rc:
-                results["passed"] = False
-                results["failures"].append(
-                    f"Return code file mismatch: expected {expected_rc}, got {result.returncode}")
+        # VALIDATE ALL OUTPUTS AGAINST EXPECTATIONS.
+        _validate_return_code(test_result, test_case, process_result.returncode)
+        _validate_stderr_empty(test_result, process_result.stderr)
+        _validate_factor_record_count(test_result, test_case)
+        _validate_error_count(test_result, test_case)
+        expected_directory_path: pathlib.Path = get_expected_directory(name)
+        _validate_against_expected_baselines(test_result, expected_directory_path, factor_path, print_path, process_result)
 
     finally:
+        # CLEAN UP THE TEMPORARY DIRECTORY.
         try:
-            shutil.rmtree(tmpdir)
+            shutil.rmtree(temporary_directory_path)
         except OSError:
             pass
 
-    return results
+    return test_result
 
+## Check that the process exit code matches the expected value.
+##
+## If the test case specifies an expected return code ("expect_rc") and the
+## actual return code differs, marks the test as failed.
+##
+## \param[in,out] test_result - Test result dict to update with pass/fail status and failure messages.
+## \param[in] test_case - Test case definition dict (may contain "expect_rc").
+## \param[in] actual_return_code - The process exit code returned by the Java program.
+def _validate_return_code(test_result: dict, test_case: dict, actual_return_code: int):
+    # CHECK IF THERE IS AN EXPECTED RETURN CODE.
+    expected_return_code: object = test_case.get("expect_rc")
+    has_expected_return_code: bool = expected_return_code is not None
+    if has_expected_return_code:
+        # CHECK IF THE RETURN CODES ARE DIFFERENT.
+        return_codes_differ: bool = actual_return_code != expected_return_code
+        if return_codes_differ:
+            # TRACK THE FAILURE.
+            test_result["passed"] = False
+            test_result["failures"].append(f"Return code: expected {expected_return_code}, got {actual_return_code}")
 
-def generate_expected_outputs(verbose=False):
-    """Run Java-specific tests and save Java-specific baselines."""
-    print("=" * 70)
+## Check that stderr is empty (unexpected errors go to stderr).
+##
+## Any non-empty stderr output indicates an unexpected runtime error from the
+## Java program and causes the test to fail.
+##
+## \param[in,out] test_result - Test result dict to update with pass/fail status and failure messages.
+## \param[in] stderr_text - Captured standard error text from the process.
+def _validate_stderr_empty(test_result: dict, stderr_text: str):
+    # CHECK IF THERE IS STDERR OUTPUT.
+    has_stderr_output: bool = bool(stderr_text.strip())
+    if has_stderr_output:
+        # TRACK THE FAILURE.
+        # Only a preview of stderr is included to keep failure messages readable.
+        STDERR_PREVIEW_LENGTH_IN_CHARACTERS: int = 200
+        test_result["passed"] = False
+        test_result["failures"].append(f"Unexpected stderr: {stderr_text.strip()[:STDERR_PREVIEW_LENGTH_IN_CHARACTERS]}")
+
+## Check that the number of factor records matches expectations.
+##
+## If the test case specifies an expected factor record count ("expect_factor_records")
+## and the actual count differs, marks the test as failed.
+##
+## \param[in,out] test_result - Test result dict to update with pass/fail status and failure messages.
+## \param[in] test_case - Test case definition dict (may contain "expect_factor_records").
+def _validate_factor_record_count(test_result: dict, test_case: dict):
+    # CHECK IF THERE IS AN EXPECTED FACTOR RECORD COUNT.
+    expected_record_count: object = test_case.get("expect_factor_records")
+    has_expected_record_count: bool = expected_record_count is not None
+    if has_expected_record_count:
+        # CHECK IF THE RECORD COUNTS ARE DIFFERENT.
+        actual_record_count: int = test_result["factor_records"]
+        record_counts_differ: bool = actual_record_count != expected_record_count
+        if record_counts_differ:
+            # TRACK THE FAILURE.
+            test_result["passed"] = False
+            test_result["failures"].append(f"Factor records: expected {expected_record_count}, got {actual_record_count}")
+
+## Check the error count from DISPLAY output against expectations.
+##
+## If the test case specifies an expected error count ("expect_error_count")
+## and the parsed error count from stdout differs, marks the test as failed.
+##
+## \param[in,out] test_result - Test result dict to update with pass/fail status and failure messages.
+## \param[in] test_case - Test case definition dict (may contain "expect_error_count").
+def _validate_error_count(test_result: dict, test_case: dict):
+    # CHECK IF THERE IS AN EXPECTED ERROR COUNT.
+    expected_error_count: object = test_case.get("expect_error_count")
+    has_expected_error_count: bool = expected_error_count is not None
+    if has_expected_error_count:
+        # CHECK IF THE ERROR COUNTS ARE DIFFERENT.
+        actual_error_count: object = test_result["counts"].get("error_count")
+        error_counts_differ: bool = actual_error_count != expected_error_count
+        if error_counts_differ:
+            # TRACK THE FAILURE.
+            test_result["passed"] = False
+            test_result["failures"].append(f"Error count: expected {expected_error_count}, got {actual_error_count}")
+
+## Compare actual outputs against saved expected baselines.
+##
+## Checks factor file (binary), print file (text with date masking),
+## stdout content (semantic count comparison rather than textual — because
+## COBOL uses COMP-3 sign format '+004' while Java writes '4'), and
+## return code file. For sequence-error tests, also verifies that the
+## expected diagnostic messages appear in stdout.
+##
+## \param[in,out] test_result - Test result dict to update with pass/fail status and failure messages.
+## \param[in] expected_directory_path - Path to the directory containing expected baseline files.
+## \param[in] factor_path - Path to the actual factor output file produced by the Java program.
+## \param[in] print_path - Path to the actual print output file produced by the Java program.
+## \param[in] process_result - The completed process result from running the Java JAR.
+def _validate_against_expected_baselines(
+    test_result: dict,
+    expected_directory_path: pathlib.Path,
+    factor_path: str,
+    print_path: str,
+    process_result: subprocess.CompletedProcess):
+    # COMPARE THE FACTOR FILE AGAINST THE EXPECTED BASELINE.
+    expected_factor_path: pathlib.Path = expected_directory_path / test_utilities.FACTOR_FILENAME
+    expected_factor_file_exists: bool = expected_factor_path.exists()
+    if expected_factor_file_exists:
+        # CHECK IF THE FACTOR FILES MATCH.
+        factor_files_match: bool = test_utilities.files_match_binary(factor_path, str(expected_factor_path))
+        if not factor_files_match:
+            # TRACK THE FAILURE.
+            test_result["passed"] = False
+            test_result["failures"].append("Factor file does not match expected output")
+
+    # COMPARE THE PRINT FILE AGAINST THE EXPECTED BASELINE.
+    expected_print_path: pathlib.Path = expected_directory_path / test_utilities.PRINT_FILENAME
+    expected_print_file_exists: bool = expected_print_path.exists()
+    if expected_print_file_exists:
+        # CHECK IF THE PRINT FILES MATCH.
+        print_files_match: bool = test_utilities.text_files_match(print_path, str(expected_print_path))
+        if not print_files_match:
+            # TRACK THE FAILURE.
+            test_result["passed"] = False
+            test_result["failures"].append("Print file does not match expected output (ignoring date)")
+
+    # COMPARE STDOUT COUNTS SEMANTICALLY AGAINST THE EXPECTED BASELINE.
+    # COBOL formats counts as "+004" while Java writes plain "4", so we parse
+    # both sides to integers rather than comparing textually.
+    expected_stdout_path: pathlib.Path = expected_directory_path / test_utilities.STDOUT_FILENAME
+    expected_stdout_file_exists: bool = expected_stdout_path.exists()
+    if expected_stdout_file_exists:
+        # READ IN THE EXPECTED TEXT.
+        with open(expected_stdout_path, "r") as expected_stdout_file:
+            expected_stdout_text: str = expected_stdout_file.read()
+
+        # COMPARE EACH COUNT FIELD.
+        expected_counts: dict = test_utilities.parse_stdout_counts(expected_stdout_text)
+        actual_counts: dict = test_result["counts"]
+        for count_key in ["input_count", "output_count", "error_count"]:
+            # CHECK IF BOTH EXPECTED AND ACTUAL VALUES ARE PRESENT.
+            expected_value: object = expected_counts.get(count_key)
+            actual_value: object = actual_counts.get(count_key)
+            both_values_present: bool = expected_value is not None and actual_value is not None
+            if both_values_present:
+                # CHECK IF THE VALUES DIFFER.
+                values_differ: bool = expected_value != actual_value
+                if values_differ:
+                    # TRACK THE FAILURE.
+                    test_result["passed"] = False
+                    test_result["failures"].append(f"Stdout {key}: expected {expected_value}, got {actual_value}")
+
+            # CHECK IF THE EXPECTED VALUE IS PRESENT BUT THE ACTUAL VALUE IS MISSING.
+            expected_present_but_actual_missing: bool = expected_value is not None and actual_value is None
+            if expected_present_but_actual_missing:
+                # TRACK THE FAILURE.
+                test_result["passed"] = False
+                test_result["failures"].append(f"Stdout missing {count_key}")
+
+        # VALIDATE SEQUENCE ERROR DIAGNOSTIC MESSAGES.
+        _validate_sequence_error_messages(test_result, expected_stdout_text, process_result.stdout)
+
+    # COMPARE THE RETURN CODE AGAINST THE EXPECTED BASELINE.
+    expected_return_code_path: pathlib.Path = expected_directory_path / test_utilities.RETURN_CODE_FILENAME
+    expected_return_code_file_exists: bool = expected_return_code_path.exists()
+    if expected_return_code_file_exists:
+        # READ IN THE EXPECTED RETURN CODE.
+        with open(expected_return_code_path, "r") as expected_return_code_file:
+            expected_return_code: int = int(expected_return_code_file.read().strip())
+
+        # CHECK IF THE RETURN CODES ARE DIFFERENT.
+        return_codes_differ: bool = process_result.returncode != expected_return_code
+        if return_codes_differ:
+            # TRACK THE FAILURE.
+            test_result["passed"] = False
+            test_result["failures"].append(
+                f"Return code file mismatch: expected {expected_return_code}, "
+                f"got {process_result.returncode}")
+
+## Verify that sequence-error diagnostic messages appear in actual stdout.
+##
+## When the expected baseline contains 'CARDS OUT OF SEQUENCE', the Java
+## output must also contain it. Similarly for 'CURRENT CARD'. These messages
+## are emitted by both COBOL (via DISPLAY) and Java when a sequence error
+## triggers RETURN-CODE 16.
+##
+## \param[in,out] test_result - Test result dict to update with pass/fail status and failure messages.
+## \param[in] expected_stdout - The expected stdout text from the baseline file.
+## \param[in] actual_stdout - The actual stdout text captured from the Java program.
+def _validate_sequence_error_messages(test_result: dict, expected_stdout: str, actual_stdout: str):
+    # VERIFY THAT SEQUENCE-ERROR DIAGNOSTIC MESSAGES APPEAR IN ACTUAL STDOUT.
+    expected_has_sequence_error: bool = "CARDS OUT OF SEQUENCE" in expected_stdout
+    if expected_has_sequence_error:
+        # CHECK IF THE ACTUAL OUTPUT INDICATES A SEQUENCE ERROR.
+        actual_has_sequence_error: bool = "CARDS OUT OF SEQUENCE" in actual_stdout
+        if not actual_has_sequence_error:
+            # TRACK THE FAILURE.
+            test_result["passed"] = False
+            test_result["failures"].append("Stdout missing 'CARDS OUT OF SEQUENCE' message")
+
+        # CHECK IF THE EXPECTED OUTPUT INDICATES A CURRENT CARD.
+        expected_has_current_card: bool = "CURRENT CARD" in expected_stdout
+        if expected_has_current_card:
+            # CHECK IF THE ACTUAL OUTPUT INDICATES A CURRENT CARD.
+            actual_has_current_card: bool = "CURRENT CARD" in actual_stdout
+            if not actual_has_current_card:
+                # TRACK THE FAILURE.
+                test_result["passed"] = False
+                test_result["failures"].append("Stdout missing 'CURRENT CARD' message")
+
+# ============================================================================
+# BASELINE GENERATION
+# ============================================================================
+
+## Run Java-specific tests and save Java-specific baselines.
+##
+## Only generates baselines for tests listed in JAVA_SPECIFIC_TESTS. All
+## other tests use the shared COBOL baselines from expected_output/.
+## Currently JAVA_SPECIFIC_TESTS is empty, so this is a no-op.
+##
+## \param[in] verbose - If True, show detailed output for each test case.
+def generate_expected_outputs(verbose: bool = False):
+    # PRINT THE GENERATION BANNER.
+    HEADER_SEPARATOR_CHARACTER: str = "="
+    HEADER_SEPARATOR_CHARACTER_COUNT: int = 70
+    HEADER_SEPARATOR_LINE: str = HEADER_SEPARATOR_CHARACTER * HEADER_SEPARATOR_CHARACTER_COUNT
+    print(HEADER_SEPARATOR_LINE)
     print("GENERATING JAVA-SPECIFIC EXPECTED OUTPUT BASELINES")
-    print("=" * 70)
+    print(HEADER_SEPARATOR_LINE)
     print()
     print("Only generating baselines for tests with known COBOL/Java differences.")
     print(f"Other tests use the COBOL baselines in expected_output/.")
     print()
 
-    for test_case in TEST_CASES:
-        name = test_case["name"]
-        if name not in JAVA_SPECIFIC_TESTS:
+    # GENERATE BASELINES ONLY FOR TESTS WITH KNOWN COBOL/JAVA DIFFERENCES.
+    for test_case in test_utilities.TEST_CASES:
+        # CHECK IF THE TEST CASE IS JAVA-SPECIFIC.
+        test_case_name: str = test_case["name"]
+        is_java_specific_test: bool = test_case_name in JAVA_SPECIFIC_TESTS
+        if not is_java_specific_test:
+            # SKIP THE TEST CASE IF IT IS NOT JAVA-SPECIFIC.
             continue
 
-        input_path = TEST_CASES_DIR / name / INPUT_FILENAME
-        expected_dir = EXPECTED_OUTPUT_JAVA_DIR / name
+        # PROVIDE VISIBILITY INTO THE TEST CASE BEING PROCESSED.
+        print(f"  Generating: {test_case_name}...")
+        print(f"    Reason: {JAVA_SPECIFIC_TESTS[test_case_name]}")
 
-        print(f"  Generating: {name}...")
-        print(f"    Reason: {JAVA_SPECIFIC_TESTS[name]}")
-
-        if not input_path.exists():
-            print(f"    SKIPPED - Input file not found: {input_path}")
+        # SKIP IF THE INPUT CARD FILE DOES NOT EXIST.
+        input_card_file_path: pathlib.Path = test_utilities.g_test_cases_directory_path / test_case_name / test_utilities.INPUT_FILENAME
+        input_card_file_exists: bool = input_card_file_path.exists()
+        if not input_card_file_exists:
+            print(f"    SKIPPED - Input file not found: {input_card_file_path}")
             continue
 
-        expected_dir.mkdir(parents=True, exist_ok=True)
+        # ENSURE THE EXPECTED OUTPUT DIRECTORY EXISTS.
+        expected_directory_path: pathlib.Path = g_expected_output_java_directory_path / test_case_name
+        expected_directory_path.mkdir(parents = True, exist_ok = True)
 
-        tmpdir = tempfile.mkdtemp(prefix=f"clreb020_jgen_{name}_")
-        factor_path = os.path.join(tmpdir, FACTOR_FILENAME)
-        print_path = os.path.join(tmpdir, PRINT_FILENAME)
-
+        # EXECUTE THE JAVA PROGRAM IN A TEMPORARY DIRECTORY.
+        # A temporary directory is used to hold some files that will be cleaned up after the test.
+        temporary_directory_path: str = tempfile.mkdtemp(prefix = f"clreb020_jgen_{test_case_name}_")
         try:
-            result = subprocess.run(
-                ["java", "-jar", str(JAVA_JAR),
-                 str(input_path), print_path, factor_path],
-                capture_output=True,
-                text=True,
-                timeout=30,
-                cwd=tmpdir,
-            )
+            # RUN THE JAVA JAR AND SAVE ALL OUTPUTS AS BASELINES.
+            factor_path: str = os.path.join(temporary_directory_path, test_utilities.FACTOR_FILENAME)
+            print_path: str = os.path.join(temporary_directory_path, test_utilities.PRINT_FILENAME)
+            process_result: subprocess.CompletedProcess = subprocess.run(
+                [
+                    "java", "-jar", str(g_java_jar_path),
+                    str(input_card_file_path), print_path, factor_path,
+                ],
+                capture_output = True,
+                text = True,
+                timeout = test_utilities.SUBPROCESS_TIMEOUT_IN_SECONDS,
+                cwd = temporary_directory_path)
 
-            # Save factor file
-            if os.path.exists(factor_path) and os.path.getsize(factor_path) > 0:
-                shutil.copy2(factor_path, str(expected_dir / FACTOR_FILENAME))
-                size = os.path.getsize(factor_path)
-                print(f"    Saved factor.dat ({size} bytes, {size // FACTOR_RECORD_SIZE} records)")
-            else:
-                with open(str(expected_dir / FACTOR_FILENAME), "wb") as f:
-                    pass
-                print(f"    Saved factor.dat (0 bytes, empty)")
+            # SAVE ALL OUTPUT FILES AS EXPECTED BASELINES.
+            _save_baseline_file(factor_path, expected_directory_path / test_utilities.FACTOR_FILENAME, "factor.dat")
+            _save_baseline_file(print_path, expected_directory_path / test_utilities.PRINT_FILENAME, "print.dat")
 
-            # Save print file
-            if os.path.exists(print_path) and os.path.getsize(print_path) > 0:
-                shutil.copy2(print_path, str(expected_dir / PRINT_FILENAME))
-                size = os.path.getsize(print_path)
-                print(f"    Saved print.dat ({size} bytes)")
-            else:
-                with open(str(expected_dir / PRINT_FILENAME), "wb") as f:
-                    pass
-                print(f"    Saved print.dat (0 bytes, empty)")
-
-            # Save stdout
-            with open(str(expected_dir / STDOUT_FILENAME), "w") as f:
-                f.write(result.stdout)
+            # SAVE THE STDOUT AND RETURN CODE AS BASELINES.
+            with open(str(expected_directory_path / test_utilities.STDOUT_FILENAME), "w") as stdout_file:
+                stdout_file.write(process_result.stdout)
             print(f"    Saved stdout.txt")
 
-            # Save return code
-            with open(str(expected_dir / RETURN_CODE_FILENAME), "w") as f:
-                f.write(str(result.returncode))
-            print(f"    Saved returncode.txt (RC={result.returncode})")
+            with open(str(expected_directory_path / test_utilities.RETURN_CODE_FILENAME), "w") as return_code_file:
+                return_code_file.write(str(process_result.returncode))
+            print(f"    Saved returncode.txt (RC={process_result.returncode})")
 
+            # PRINT VERBOSE DETAILS IF REQUESTED.
             if verbose:
-                print(f"    Stdout: {repr(result.stdout[:200])}")
+                print(f"    Stdout: {repr(process_result.stdout[:200])}")
 
         finally:
+            # CLEAN UP THE TEMPORARY DIRECTORY.
             try:
-                shutil.rmtree(tmpdir)
+                shutil.rmtree(temporary_directory_path)
             except OSError:
                 pass
 
         print()
 
+    # PRINT THE COMPLETION BANNER.
     print("Java-specific baseline generation complete.")
     print()
 
+## Copy an output file to the expected baselines directory.
+##
+## If the source file exists and is non-empty, copies it. Otherwise,
+## creates an empty file to indicate that empty output is expected.
+##
+## \param[in] source_path - Path to the output file produced by the test run.
+## \param[in] destination_path - Path where the baseline file should be saved.
+## \param[in] display_name - Human-readable filename shown in progress messages (e.g., "factor.dat").
+def _save_baseline_file(source_path: str, destination_path: pathlib.Path, display_name: str):
+    # CHECK IF THE SOURCE FILE HAS CONTENT.
+    source_file_has_content: bool = os.path.exists(source_path) and os.path.getsize(source_path) > 0
+    if source_file_has_content:
+        # COPY THE SOURCE FILE TO THE DESTINATION PATH.
+        shutil.copy2(source_path, str(destination_path))
 
-def run_all_tests(verbose=False):
-    """Run all 50 test cases via Java and report results."""
-    print("=" * 70)
+        # GET THE SIZE OF THE SOURCE FILE IN BYTES.
+        file_size_in_bytes: int = os.path.getsize(source_path)
+
+        # CHECK IF THIS IS THE FACTOR FILE OR ANOTHER FILE.
+        is_factor_file: bool = display_name == test_utilities.FACTOR_FILENAME
+        if is_factor_file:
+            # CALCULATE THE RECORD COUNT.
+            record_count: int = file_size_in_bytes // test_utilities.FACTOR_RECORD_SIZE_IN_BYTES
+            print(f"    Saved {display_name} ({file_size_in_bytes} bytes, {record_count} records)")
+        else:
+            # JUST DISPLAY THE FILE SIZE.
+            print(f"    Saved {display_name} ({file_size_in_bytes} bytes)")
+    else:
+        # CREATE AN EMPTY FILE TO INDICATE THAT THE FILE IS EMPTY.
+        with open(str(destination_path), "wb"):
+            pass
+        print(f"    Saved {display_name} (0 bytes, empty)")
+
+# ============================================================================
+# TEST SUITE RUNNER
+# ============================================================================
+
+## Run all 50 test cases via Java and print a summary report.
+##
+## \param[in] verbose - If True, show detailed output for each test case.
+## \return 0 if all tests passed, 1 if any test failed.
+def run_all_tests(verbose: bool = False) -> int:
+    # PRINT THE HARNESS BANNER.
+    HEADER_SEPARATOR_CHARACTER: str = "="
+    HEADER_SEPARATOR_CHARACTER_COUNT: int = 70
+    HEADER_SEPARATOR_LINE: str = HEADER_SEPARATOR_CHARACTER * HEADER_SEPARATOR_CHARACTER_COUNT
+    print(HEADER_SEPARATOR_LINE)
     print("CLREB020 JAVA TEST HARNESS")
-    print("=" * 70)
+    print(HEADER_SEPARATOR_LINE)
     print()
-    print(f"Java JAR:      {JAVA_JAR}")
-    print(f"Test cases:    {TEST_CASES_DIR}")
-    print(f"Expected:      {EXPECTED_OUTPUT_DIR}")
-    print(f"Java-specific: {EXPECTED_OUTPUT_JAVA_DIR}")
+    print(f"Java JAR:      {g_java_jar_path}")
+    print(f"Test cases:    {test_utilities.g_test_cases_directory_path}")
+    print(f"Expected:      {test_utilities.g_expected_output_directory_path}")
+    print(f"Java-specific: {g_expected_output_java_directory_path}")
     print()
 
-    if not JAVA_JAR.exists():
-        print(f"ERROR: JAR not found: {JAVA_JAR}")
+    # VERIFY THAT THE JAVA JAR EXISTS.
+    ERROR_EXIT_CODE: int = 1
+    java_jar_exists: bool = g_java_jar_path.exists()
+    if not java_jar_exists:
+        print(f"ERROR: JAR not found: {g_java_jar_path}")
         print("Build with: cd tax_extension_java && mvn clean package -q")
-        sys.exit(1)
+        return ERROR_EXIT_CODE
 
-    # Check java is available
+    # VERIFY THAT JAVA IS AVAILABLE ON THE PATH.
     try:
-        subprocess.run(["java", "-version"], capture_output=True, timeout=10)
+        # RUN THE JAVA VERSION CHECK.
+        # A quick version check should complete almost instantly; 10 seconds
+        # is a generous upper bound for a slow or cold JVM start.
+        VERSION_CHECK_TIMEOUT_IN_SECONDS: int = 10
+        subprocess.run(
+            ["java", "-version"],
+            capture_output = True,
+            timeout = VERSION_CHECK_TIMEOUT_IN_SECONDS)
     except (FileNotFoundError, subprocess.TimeoutExpired):
         print("ERROR: Java runtime not found. Install JDK 17+.")
-        sys.exit(1)
+        return ERROR_EXIT_CODE
 
-    total = len(TEST_CASES)
-    passed = 0
-    failed = 0
-    java_specific_count = 0
-    errors = []
+    # RUN EACH TEST CASE AND ACCUMULATE RESULTS.
+    total_test_count: int = len(test_utilities.TEST_CASES)
+    passed_count: int = 0
+    failed_count: int = 0
+    java_specific_count: int = 0
+    failure_details: list[tuple[str, list[str]]] = []
 
-    print("-" * 70)
+    MINOR_SEPARATOR_CHARACTER: str = "-"
+    MINOR_SEPARATOR_LINE: str = MINOR_SEPARATOR_CHARACTER * HEADER_SEPARATOR_CHARACTER_COUNT
+    print(MINOR_SEPARATOR_LINE)
 
-    for test_case in TEST_CASES:
-        name = test_case["name"]
-        result = run_test(test_case, verbose=verbose)
+    for test_case in test_utilities.TEST_CASES:
+        # RUN THE TEST CASE.
+        test_case_name: str = test_case["name"]
+        test_case_result: dict = run_test(test_case, verbose = verbose)
 
-        if result["passed"]:
-            if result["java_specific"]:
-                status = "JSPC"
+        # CHECK IF THE TEST PASSED OR FAILED.
+        if test_case_result["passed"]:
+            # CHECK IF THIS TEST USES JAVA-SPECIFIC BASELINES.
+            is_java_specific: bool = test_case_result["java_specific"]
+            if is_java_specific:
+                status: str = "JSPC"
                 java_specific_count += 1
             else:
                 status = "PASS"
-            passed += 1
+            passed_count += 1
         else:
             status = "FAIL"
-            failed += 1
-            errors.append((name, result["failures"]))
+            failed_count += 1
+            failure_details.append((test_case_name, test_case_result["failures"]))
 
-        rc_str = f"RC={result['return_code']}" if result["return_code"] is not None else "RC=?"
-        counts = result["counts"]
-        count_str = ""
-        if counts.get("input_count") is not None:
-            count_str = (
-                f"in={counts['input_count']} "
-                f"out={counts.get('output_count', '?')} "
-                f"err={counts.get('error_count', '?')}"
+        # FORMAT THE RETURN CODE AND COUNTS FOR DISPLAY.
+        return_code_display: str = (
+            f"RC={test_case_result['return_code']}"
+            if test_case_result["return_code"] is not None
+            else "RC=?"
+        )
+        record_counts: dict = test_case_result["counts"]
+        counts_display: str = ""
+        has_input_count: bool = record_counts.get("input_count") is not None
+        if has_input_count:
+            counts_display = (
+                f"in={record_counts['input_count']} "
+                f"out={record_counts.get('output_count', '?')} "
+                f"err={record_counts.get('error_count', '?')}"
             )
 
-        print(f"  [{status:4s}] {name:<25} {rc_str:<8} {count_str}")
+        # PRINT THE OVERALL SUMMARY FOR THIS TEST.
+        # "JSPC" is 4 chars; "PASS"/"FAIL" are 4 chars — no padding needed.
+        print(f"  [{status:4s}] {test_case_name:<25} {return_code_display:<8} {counts_display}")
 
-        if verbose and result["failures"]:
-            for failure in result["failures"]:
+        # PRINT VERBOSE FAILURE DETAILS IF REQUESTED.
+        has_failures: bool = verbose and bool(test_case_result["failures"])
+        if has_failures:
+            for failure in test_case_result["failures"]:
                 print(f"         FAILURE: {failure}")
 
-    print("-" * 70)
+    # PRINT THE SUMMARY REPORT.
+    print(MINOR_SEPARATOR_LINE)
     print()
-    print(f"Results: {passed} passed, {failed} failed, "
-          f"{java_specific_count} java-specific baselines, {total} total")
+    print(
+        f"Results: {passed_count} passed, {failed_count} failed, "
+        f"{java_specific_count} java-specific baselines, {total_test_count} total"
+    )
     print()
 
-    if java_specific_count > 0:
+    # PRINT JAVA-SPECIFIC TEST DETAILS IF ANY EXIST.
+    has_java_specific_tests: bool = java_specific_count > 0
+    if has_java_specific_tests:
         print("JAVA-SPECIFIC TESTS (using Java baselines, not COBOL):")
-        for tc_name, desc in JAVA_SPECIFIC_TESTS.items():
-            print(f"  {tc_name}: {desc}")
+        for test_case_name, test_case_description in JAVA_SPECIFIC_TESTS.items():
+            print(f"  {test_case_name}: {test_case_description}")
         print()
 
-    if errors:
+    # PRINT FAILURE DETAILS IF ANY TESTS FAILED.
+    if failure_details:
+        # PRINT THE FAILURE DETAILS.
         print("FAILURES:")
-        for name, failures in errors:
-            print(f"  {name}:")
+        for test_case_name, failures in failure_details:
+            # PRINT FAILURES FOR THE CURRENT TEST CASE.
+            print(f"  {test_case_name}:")
             for failure in failures:
                 print(f"    - {failure}")
             print()
 
-    return 0 if failed == 0 else 1
+    # RETURN THE APPROPRIATE EXIT CODE.
+    SUCCESS_EXIT_CODE: int = 0
+    exit_code: int = SUCCESS_EXIT_CODE if failed_count == 0 else ERROR_EXIT_CODE
+    return exit_code
 
+# ============================================================================
+# MAIN ENTRY POINT
+# ============================================================================
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Java Test Harness for CLREB020 - Equalization Factor Editor"
-    )
-    parser.add_argument(
+## Parse command-line arguments and run the Java test harness.
+##
+## \return Exit code (0 if all tests passed, 1 if any test failed).
+def main() -> int:
+    # PARSE THE COMMAND LINE ARGUMENTS.
+    command_line_argument_parser: argparse.ArgumentParser = argparse.ArgumentParser(
+        description = "Java Test Harness for CLREB020 - Equalization Factor Editor")
+    command_line_argument_parser.add_argument(
         "--generate-expected",
-        action="store_true",
-        help="Run Java-specific tests and save Java baselines",
-    )
-    parser.add_argument(
+        action = "store_true",
+        help = "Run Java-specific tests and save Java baselines")
+    command_line_argument_parser.add_argument(
         "--verbose", "-v",
-        action="store_true",
-        help="Show detailed output for each test case",
-    )
-    args = parser.parse_args()
+        action = "store_true",
+        help = "Show detailed output for each test case")
+    command_line_arguments: argparse.Namespace = command_line_argument_parser.parse_args()
 
-    if args.generate_expected:
-        generate_expected_outputs(verbose=args.verbose)
+    # GENERATE EXPECTED BASELINES IF REQUESTED.
+    if command_line_arguments.generate_expected:
+        generate_expected_outputs(verbose = command_line_arguments.verbose)
         print()
 
-    exit_code = run_all_tests(verbose=args.verbose)
-    sys.exit(exit_code)
-
+    # RUN ALL TESTS AND RETURN THE EXIT CODE.
+    exit_code: int = run_all_tests(verbose = command_line_arguments.verbose)
+    return exit_code
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

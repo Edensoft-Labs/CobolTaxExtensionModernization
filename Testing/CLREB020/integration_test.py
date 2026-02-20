@@ -1,29 +1,28 @@
 #!/usr/bin/env python3
-"""
-COBOL-vs-Java Integration Test for CLREB020
-
-Runs both the compiled COBOL executable (CLREB020.exe) and the Java conversion
-(tax-extension JAR) against the same test inputs, then compares their outputs
-to verify byte-identical behavior.
-
-Usage:
-    python Testing/CLREB020/integration_test.py [--verbose] [--java-only] [--cobol-only]
-
-Prerequisites:
-    - COBOL: Build/output/CLREB020.exe (compile with Build/build.py --compile)
-    - Java:  tax_extension_java/target/tax-extension-0.1.0-SNAPSHOT.jar
-             (build with: cd tax_extension_java && mvn clean package -q)
-    - Python 3.8+
-
-Known Behavioral Differences (COBOL vs Java):
-    1. Zero-factor handling: COBOL accepts "00000" as valid (alphanumeric comparison
-       "00000" > "0    " is TRUE because '0' > ' '). Java treats "00000" as invalid
-       (numeric parse → 0, which is not > 0). The COBOL behavior is a quirk of
-       alphanumeric comparison; the Java behavior is arguably more correct but differs
-       from the original.
-    2. Date format: Both use YYYYMMDD but the date is the current date, so outputs
-       will match if run on the same day. Date fields are masked in comparisons.
-"""
+## \file integration_test.py
+## COBOL-vs-Java Integration Test for CLREB020.
+##
+## Runs both the compiled COBOL executable (CLREB020.exe) and the Java conversion
+## (tax-extension JAR) against the same test inputs, then compares their outputs
+## to verify byte-identical behavior.
+##
+## Usage:
+##     python Testing/CLREB020/integration_test.py [--verbose] [--java-only] [--cobol-only]
+##
+## Prerequisites:
+##     - COBOL: Build/output/CLREB020.exe (compile with Build/build.py --compile)
+##     - Java:  tax_extension_java/target/tax-extension-0.1.0-SNAPSHOT.jar
+##              (build with: cd tax_extension_java && mvn clean package -q)
+##     - Python 3.8+
+##
+## Known Behavioral Differences (COBOL vs Java):
+##     1. Zero-factor handling: COBOL accepts "00000" as valid (alphanumeric comparison
+##        "00000" > "0    " is TRUE because '0' > ' '). Java treats "00000" as invalid
+##        (numeric parse -> 0, which is not > 0). The COBOL behavior is a quirk of
+##        alphanumeric comparison; the Java behavior is arguably more correct but differs
+##        from the original.
+##     2. Date format: Both use YYYYMMDD but the date is the current date, so outputs
+##        will match if run on the same day. Date fields are masked in comparisons.
 
 import os
 import sys
@@ -32,44 +31,39 @@ import tempfile
 import shutil
 import argparse
 import re
-from pathlib import Path
+import pathlib
 from typing import Optional
-
 
 # ============================================================================
 # Configuration
 # ============================================================================
-
-SCRIPT_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = SCRIPT_DIR.parent.parent
-
-BUILD_DIR = PROJECT_ROOT / "Build"
-COBOL_EXE = BUILD_DIR / "output" / "CLREB020.exe"
-
-JAVA_DIR = PROJECT_ROOT / "tax_extension_java"
-JAVA_JAR = JAVA_DIR / "target" / "tax-extension-0.1.0-SNAPSHOT.jar"
-
-TEST_CASES_DIR = SCRIPT_DIR / "test_cases"
-
-# GnuCOBOL DD name environment variables
-DD_INPUT_VAR = "DD_CARDS"
-DD_FACTOR_VAR = "DD_FACTOR"
-DD_PRINT_VAR = "DD_PRINT"
-
-# File names
-FACTOR_FILENAME = "factor.dat"
-PRINT_FILENAME = "print.dat"
-
-# Known differences between COBOL and Java (test_case_name → description)
-KNOWN_DIFFERENCES = {
-}
-
+## Absolute path to the directory containing this script (Testing/CLREB020/).
+g_test_harness_directory_absolute_path: pathlib.Path = pathlib.Path(__file__).resolve().parent
+## Absolute path to the project root (CobolTaxProgramModernization/).
+g_project_root_absolute_path: pathlib.Path = g_test_harness_directory_absolute_path.parent.parent
+## Directory containing GnuCOBOL runtime DLLs and compiled executables.
+g_build_directory_path: pathlib.Path = g_project_root_absolute_path / "Build"
+## Path to the compiled GnuCOBOL CLREB020 executable.
+g_cobol_executable_path: pathlib.Path = g_build_directory_path / "output" / "CLREB020.exe"
+## Root directory of the Java tax extension project.
+g_java_project_directory_path: pathlib.Path = g_project_root_absolute_path / "tax_extension_java"
+## Path to the compiled tax-extension JAR file.
+g_java_jar_path: pathlib.Path = g_java_project_directory_path / "target" / "tax-extension-0.1.0-SNAPSHOT.jar"
+## Directory containing test case input files, one subdirectory per test.
+g_test_cases_directory_path: pathlib.Path = g_test_harness_directory_absolute_path / "test_cases"
+## Output filename for the binary factor records.
+FACTOR_FILENAME: str = "factor.dat"
+## Output filename for the print report.
+PRINT_FILENAME: str = "print.dat"
+## Known behavioral differences between COBOL and Java (test_case_name to description).
+## Currently empty: all differences have been resolved.
+KNOWN_DIFFERENCES: dict[str, str] = {}
 
 # ============================================================================
 # Test Case Definitions (all 50 tests)
 # ============================================================================
-
-TEST_CASES = [
+## All 50 integration test cases with name and description.
+TEST_CASES: list[dict[str, str]] = [
     # Existing (1-7)
     {"name": "valid_basic", "description": "4 valid cards"},
     {"name": "valid_multipage", "description": "64 valid cards, page breaks"},
@@ -131,461 +125,692 @@ TEST_CASES = [
     {"name": "single_invalid_card", "description": "1 invalid card"},
 ]
 
-
 # ============================================================================
 # Runner Functions
 # ============================================================================
 
+## Captures the result of running either the COBOL or Java program.
+##
+## Holds the process return code, captured stdout/stderr, output file
+## contents, and an optional error message if the process failed to run.
 class RunResult:
-    """Captures the result of running either the COBOL or Java program."""
-
+    ## Initialize all result fields to their default (empty/None) values.
     def __init__(self):
+        ## Process exit code (None if the process did not run).
         self.return_code: Optional[int] = None
+        ## Captured standard output text from the process.
         self.stdout: str = ""
+        ## Captured standard error text from the process.
         self.stderr: str = ""
+        ## Raw bytes read from the binary factor output file.
         self.factor_content: bytes = b""
+        ## Text read from the print report output file.
         self.print_content: str = ""
+        ## Human-readable error message if the process failed to launch
+        ## or timed out. None indicates the process ran successfully.
         self.error: Optional[str] = None
 
+    ## True if no error occurred, False otherwise.
     @property
     def ok(self) -> bool:
-        return self.error is None
+        # CHECK IF AN ERROR EXISTS.
+        error_exists: bool = self.error is not None
+        return not error_exists
 
+## Run the COBOL executable with the given input file.
+##
+## \param[in] input_path - Path to the input card file.
+## \param[in] temporary_directory_path - Working directory for output files.
+## \return Run result with return code, stdout, stderr, and output file contents.
+def run_cobol(input_card_file_path: pathlib.Path, temporary_directory_path: str) -> RunResult:
+    # BUILD THE ENVIRONMENT FOR RUNNING THE COBOL PROGRAM.
+    process_environment: dict = os.environ.copy()
+    process_environment["PATH"] = str(g_build_directory_path) + os.pathsep + process_environment.get("PATH", "")
 
-def run_cobol(input_path: Path, tmpdir: str) -> RunResult:
-    """Run the COBOL executable with the given input file."""
-    result = RunResult()
-    factor_path = os.path.join(tmpdir, "cobol_" + FACTOR_FILENAME)
-    print_path = os.path.join(tmpdir, "cobol_" + PRINT_FILENAME)
+    # Environment variables that COBOL uses for DD-name file assignments.
+    DD_INPUT_ENVIRONMENT_VARIABLE_NAME: str = "DD_CARDS"
+    process_environment[DD_INPUT_ENVIRONMENT_VARIABLE_NAME] = str(input_card_file_path)
 
-    env = os.environ.copy()
-    env["PATH"] = str(BUILD_DIR) + os.pathsep + env.get("PATH", "")
-    env[DD_INPUT_VAR] = str(input_path)
-    env[DD_FACTOR_VAR] = factor_path
-    env[DD_PRINT_VAR] = print_path
+    DD_FACTOR_ENVIRONMENT_VARIABLE_NAME: str = "DD_FACTOR"
+    factor_path: str = os.path.join(temporary_directory_path, "cobol_" + FACTOR_FILENAME)
+    process_environment[DD_FACTOR_ENVIRONMENT_VARIABLE_NAME] = factor_path
 
+    DD_PRINT_ENVIRONMENT_VARIABLE_NAME: str = "DD_PRINT"
+    print_path: str = os.path.join(temporary_directory_path, "cobol_" + PRINT_FILENAME)
+    process_environment[DD_PRINT_ENVIRONMENT_VARIABLE_NAME] = print_path
+
+    # RUN THE COBOL PROGRAM TO RETURN THE RESULT.
+    # CLREB020 processes at most a few hundred cards, so 30 seconds is
+    # generous and guards against hangs without rushing normal runs.
+    PROCESS_TIMEOUT_IN_SECONDS: int = 30
+    run_result: RunResult = RunResult()
     try:
-        proc = subprocess.run(
-            [str(COBOL_EXE)],
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            cwd=tmpdir,
-        )
-        result.return_code = proc.returncode
-        result.stdout = proc.stdout
-        result.stderr = proc.stderr
+        # RUN THE COBOL PROGRAM AND GET THE RESULT.
+        process_result: subprocess.CompletedProcess = subprocess.run(
+            [str(g_cobol_executable_path)],
+            env = process_environment,
+            capture_output = True,
+            text = True,
+            timeout = PROCESS_TIMEOUT_IN_SECONDS,
+            cwd = temporary_directory_path)
+        run_result.return_code = process_result.returncode
+        run_result.stdout = process_result.stdout
+        run_result.stderr = process_result.stderr
     except subprocess.TimeoutExpired:
-        result.error = "COBOL execution timed out (30s)"
-        return result
+        run_result.error = f"COBOL execution timed out ({PROCESS_TIMEOUT_IN_SECONDS}s)"
+        return run_result
     except FileNotFoundError:
-        result.error = f"COBOL executable not found: {COBOL_EXE}"
-        return result
+        run_result.error = f"COBOL executable not found: {g_cobol_executable_path}"
+        return run_result
 
-    # Read output files
-    if os.path.exists(factor_path):
-        with open(factor_path, "rb") as f:
-            result.factor_content = f.read()
-    if os.path.exists(print_path):
-        with open(print_path, "r", errors="replace") as f:
-            result.print_content = f.read()
+    # READ THE OUTPUT FILES PRODUCED BY THE COBOL PROGRAM.
+    factor_file_exists: bool = os.path.exists(factor_path)
+    if factor_file_exists:
+        with open(factor_path, "rb") as factor_file:
+            run_result.factor_content = factor_file.read()
 
-    return result
+    print_file_exists: bool = os.path.exists(print_path)
+    if print_file_exists:
+        with open(print_path, "r", errors = "replace") as print_file:
+            run_result.print_content = print_file.read()
 
+    return run_result
 
-def run_java(input_path: Path, tmpdir: str) -> RunResult:
-    """Run the Java program with the given input file."""
-    result = RunResult()
-    factor_path = os.path.join(tmpdir, "java_" + FACTOR_FILENAME)
-    print_path = os.path.join(tmpdir, "java_" + PRINT_FILENAME)
-
+## Run the Java program with the given input file.
+##
+## \param[in] input_card_file_path - Path to the input card file.
+## \param[in] temporary_directory_path - Working directory for output files.
+## \return Run result with return code, stdout, stderr, and output file contents.
+def run_java(input_card_file_path: pathlib.Path, temporary_directory_path: str) -> RunResult:
+    # EXECUTE THE JAVA JAR WITH INPUT AND OUTPUT FILE PATHS.
+    run_result: RunResult = RunResult()
     try:
-        proc = subprocess.run(
-            ["java", "-jar", str(JAVA_JAR),
-             str(input_path), print_path, factor_path],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            cwd=tmpdir,
-        )
-        result.return_code = proc.returncode
-        result.stdout = proc.stdout
-        result.stderr = proc.stderr
+        # RUN THE JAVA JAR AND GET THE RESULT.
+        # CLREB020 processes at most a few hundred cards, so 30 seconds is
+        # generous and guards against hangs without rushing normal runs.
+        PROCESS_TIMEOUT_IN_SECONDS: int = 30
+        factor_path: str = os.path.join(temporary_directory_path, "java_" + FACTOR_FILENAME)
+        print_path: str = os.path.join(temporary_directory_path, "java_" + PRINT_FILENAME)
+        process_result: subprocess.CompletedProcess = subprocess.run(
+            ["java", "-jar", str(g_java_jar_path),
+             str(input_card_file_path), print_path, factor_path],
+            capture_output = True,
+            text = True,
+            timeout = PROCESS_TIMEOUT_IN_SECONDS,
+            cwd = temporary_directory_path)
+        run_result.return_code = process_result.returncode
+        run_result.stdout = process_result.stdout
+        run_result.stderr = process_result.stderr
     except subprocess.TimeoutExpired:
-        result.error = "Java execution timed out (30s)"
-        return result
+        run_result.error = f"Java execution timed out ({PROCESS_TIMEOUT_IN_SECONDS}s)"
+        return run_result
     except FileNotFoundError:
-        result.error = "Java runtime (java) not found. Install JDK 17+."
-        return result
+        run_result.error = "Java runtime (java) not found. Install JDK 17+."
+        return run_result
 
-    # Read output files
-    if os.path.exists(factor_path):
-        with open(factor_path, "rb") as f:
-            result.factor_content = f.read()
-    if os.path.exists(print_path):
-        with open(print_path, "r", errors="replace") as f:
-            result.print_content = f.read()
+    # READ THE OUTPUT FILES PRODUCED BY THE JAVA PROGRAM.
+    factor_file_exists: bool = os.path.exists(factor_path)
+    if factor_file_exists:
+        with open(factor_path, "rb") as factor_file:
+            run_result.factor_content = factor_file.read()
 
-    return result
+    print_file_exists: bool = os.path.exists(print_path)
+    if print_file_exists:
+        with open(print_path, "r", errors = "replace") as print_file:
+            run_result.print_content = print_file.read()
 
+    return run_result
 
 # ============================================================================
 # Comparison Functions
 # ============================================================================
 
+## Replace YYYYMMDD date strings (current date) with a placeholder.
+##
+## The date appears in the page header. We mask any 8-digit string that
+## looks like a date (starts with 20xx) to allow comparison across runs.
+##
+## \param[in] text - The text containing potential date strings.
+## \return The text with all YYYYMMDD dates replaced by "XXXXXXXX".
 def mask_date(text: str) -> str:
-    """Replace YYYYMMDD date strings (current date) with a placeholder.
+    # Matches "20" followed by exactly 6 digits, i.e. any YYYYMMDD date
+    # in the 2000s (e.g. "20260220"). The COBOL and Java programs embed
+    # the current date in print headers, which would cause spurious
+    # mismatches if not masked.
+    DATE_IN_2000S_REGEX_PATTERN: str = r"20\d{6}"
+    masked_date_text: str = re.sub(DATE_IN_2000S_REGEX_PATTERN, "XXXXXXXX", text)
+    return masked_date_text
 
-    The date appears in the page header. We mask any 8-digit string that
-    looks like a date (starts with 20xx) to allow comparison across runs.
-    """
-    return re.sub(r"20\d{6}", "XXXXXXXX", text)
-
-
+## Normalize print file content for comparison.
+##
+## Strips trailing whitespace from each line, masks date fields,
+## and normalizes line endings.
+##
+## \param[in] text - Raw print file content.
+## \return Normalized content suitable for comparison.
 def normalize_print(text: str) -> str:
-    """Normalize print file content for comparison.
+    # GET STRIPPED LINES FROM THE ORIGINAL TEXT.
+    # There may be multiple different kind of newlines that need to be normalized.
+    lines: list[str] = text.replace("\r\n", "\n").split("\n")
+    # Stripping trailing whitespace from each line helps with detecting conceptually empty lines.
+    normalized_lines: list[str] = [line.rstrip() for line in lines]
 
-    - Strip trailing whitespace from each line
-    - Mask date fields
-    - Normalize line endings
-    """
-    lines = text.replace("\r\n", "\n").split("\n")
-    normalized = [line.rstrip() for line in lines]
-    # Remove trailing empty lines
-    while normalized and normalized[-1] == "":
-        normalized.pop()
-    return mask_date("\n".join(normalized))
+    # REMOVE ANY EMPTY LINES AT THE BOTTOM OF THE TEXT.
+    LAST_LINE_INDEX: int = -1
+    last_line_is_empty: bool = bool(normalized_lines) and normalized_lines[LAST_LINE_INDEX] == ""
+    while last_line_is_empty:
+        # REMOVE THE CURRENT EMPTY LINE.
+        normalized_lines.pop()
 
+        # NEXT IF THE NEW LAST LINE IS EMPTY.
+        last_line_is_empty = bool(normalized_lines) and normalized_lines[LAST_LINE_INDEX] == ""
 
+    # RETURN THE COMPACTED TEXT WITH MASKED DATES.
+    normalized_text: str = "\n".join(normalized_lines)
+    normalized_text_with_masked_dates: str = mask_date(normalized_text)
+    return normalized_text_with_masked_dates
+
+## Compare DISPLAY output from both programs.
+##
+## Both should print the same counts:
+##     NO. OF INPUT RECORDS  = NNN
+##     NO. OF OUTPUT RECORDS = NNN
+##     NO. OF ERROR RECORDS  = NNN
+##
+## COBOL uses COMP-3 sign display (e.g., "+004") while Java uses plain int.
+## We extract just the numeric values for comparison.
+##
+## \param[in] cobol_stdout - Captured stdout from the COBOL program.
+## \param[in] java_stdout - Captured stdout from the Java program.
+## \return list of difference descriptions (empty if counts match).
 def compare_stdout(cobol_stdout: str, java_stdout: str) -> list[str]:
-    """Compare DISPLAY output from both programs.
+    # EXTRACT RECORD COUNTS FROM BOTH PROGRAMS AND COMPARE THEM.
+    differences: list[str] = []
 
-    Both should print the same counts:
-        NO. OF INPUT RECORDS  = NNN
-        NO. OF OUTPUT RECORDS = NNN
-        NO. OF ERROR RECORDS  = NNN
+    ## Parse input/output/error record counts from DISPLAY output text.
+    ##
+    ## Handles both COBOL COMP-3 sign format ("+004") and plain integers ("4")
+    ## by stripping leading "+" before parsing.
+    ##
+    ## \param[in] text - Captured stdout text from either program.
+    ## \return Mapping of "input"/"output"/"error" to integer counts (or None on parse failure).
+    def extract_counts(text: str) -> dict[str, object]:
+        # EXTRACT THE RECORD COUNTS FROM THE LINES OF TEXT.
+        record_count_by_type: dict[str, object] = {}
+        text_lines: list[str] = text.splitlines()
+        for line in text_lines:
+            # STRIP THE LINE OF LEADING/TRAILING WHITESPACE.
+            # This makes parsing easier.
+            stripped_line: str = line.strip()
 
-    COBOL uses COMP-3 sign display (e.g., "+004") while Java uses plain int.
-    We extract just the numeric values for comparison.
-    """
-    differences = []
+            # DETERMINE WHICH COUNT TYPE THIS LINE REPRESENTS.
+            # Both COBOL and Java emit lines like "NO. OF INPUT RECORDS  = NNN".
+            INPUT_RECORD_LABEL: str = "INPUT RECORDS"
+            OUTPUT_RECORD_LABEL: str = "OUTPUT RECORDS"
+            ERROR_RECORD_LABEL: str = "ERROR RECORDS"
+            VALUE_SEPARATOR: str = "="
+            VALUE_PORTION_INDEX: int = 1
+            line_contains_input_label: bool = INPUT_RECORD_LABEL in stripped_line
+            line_contains_output_label: bool = OUTPUT_RECORD_LABEL in stripped_line
+            line_contains_error_label: bool = ERROR_RECORD_LABEL in stripped_line
+            line_contains_separator: bool = VALUE_SEPARATOR in stripped_line
+            is_input_record_line: bool = line_contains_input_label and line_contains_separator
+            is_output_record_line: bool = line_contains_output_label and line_contains_separator
+            is_error_record_line: bool = line_contains_error_label and line_contains_separator
 
-    def extract_counts(text: str) -> dict:
-        counts = {}
-        for line in text.splitlines():
-            line = line.strip()
-            if "INPUT RECORDS" in line and "=" in line:
+            # PARSE THE INPUT RECORD COUNT.
+            if is_input_record_line:
+                # A try block is used to catch various parsing errors.
+                INPUT_COUNT_KEY: str = "input"
                 try:
-                    val = line.split("=")[1].strip().lstrip("+")
-                    counts["input"] = int(val)
-                except (ValueError, IndexError):
-                    counts["input"] = None
-            elif "OUTPUT RECORDS" in line and "=" in line:
-                try:
-                    val = line.split("=")[1].strip().lstrip("+")
-                    counts["output"] = int(val)
-                except (ValueError, IndexError):
-                    counts["output"] = None
-            elif "ERROR RECORDS" in line and "=" in line:
-                try:
-                    val = line.split("=")[1].strip().lstrip("+")
-                    counts["error"] = int(val)
-                except (ValueError, IndexError):
-                    counts["error"] = None
-        return counts
+                    # GET THE TEXT AFTER THE VALUE SEPARATOR.
+                    text_after_separator: str = stripped_line.split(VALUE_SEPARATOR)[VALUE_PORTION_INDEX]
 
-    cobol_counts = extract_counts(cobol_stdout)
-    java_counts = extract_counts(java_stdout)
+                    # EXTRACT THE NUMERIC COUNT FROM THE TEXT.
+                    # Strip whitespace, then remove the leading "+" sign that
+                    # COBOL COMP-3 DISPLAY format produces (e.g. "+004" -> "004").
+                    input_record_count_text: str = text_after_separator.strip().lstrip("+")
+                    counts[INPUT_COUNT_KEY] = int(input_record_count_text)
+                except (ValueError, IndexError):
+                    # INDICATE NO VALID INPUT COUNT WAS FOUND.
+                    record_count_by_type[INPUT_COUNT_KEY] = None
 
-    for key in ["input", "output", "error"]:
-        c_val = cobol_counts.get(key)
-        j_val = java_counts.get(key)
-        if c_val != j_val:
-            differences.append(
-                f"{key} count: COBOL={c_val}, Java={j_val}"
-            )
+            # PARSE THE OUTPUT RECORD COUNT.
+            elif is_output_record_line:
+                # A try block is used to catch various parsing errors.
+                OUTPUT_COUNT_KEY: str = "output"
+                try:
+                    # GET THE TEXT AFTER THE VALUE SEPARATOR.
+                    text_after_separator: str = stripped_line.split(VALUE_SEPARATOR)[VALUE_PORTION_INDEX]
+
+                    # EXTRACT THE NUMERIC COUNT FROM THE TEXT.
+                    # Strip whitespace, then remove the leading "+" sign that
+                    # COBOL COMP-3 DISPLAY format produces (e.g. "+004" -> "004").
+                    output_record_count_text: str = text_after_separator.strip().lstrip("+")
+                    counts[OUTPUT_COUNT_KEY] = int(output_record_count_text)
+                except (ValueError, IndexError):
+                    # INDICATE NO VALID OUTPUT COUNT WAS FOUND.
+                    record_count_by_type[OUTPUT_COUNT_KEY] = None
+
+            # PARSE THE ERROR RECORD COUNT.
+            elif is_error_record_line:
+                # A try block is used to catch various parsing errors.
+                ERROR_COUNT_KEY: str = "error"
+                try:
+                    # GET THE TEXT AFTER THE VALUE SEPARATOR.
+                    text_after_separator: str = stripped_line.split(VALUE_SEPARATOR)[VALUE_PORTION_INDEX]
+
+                    # EXTRACT THE NUMERIC COUNT FROM THE TEXT.
+                    # Strip whitespace, then remove the leading "+" sign that
+                    # COBOL COMP-3 DISPLAY format produces (e.g. "+004" -> "004").
+                    error_record_count_text: str = text_after_separator.strip().lstrip("+")
+                    counts[ERROR_COUNT_KEY] = int(error_record_count_text)
+                except (ValueError, IndexError):
+                    # INDICATE NO VALID ERROR COUNT WAS FOUND.
+                    record_count_by_type[ERROR_COUNT_KEY] = None
+
+        return record_count_by_type
+
+    # GET RECORD COUNTS FOR BOTH PROGRAMS.
+    cobol_record_count_by_type: dict[str, object] = extract_counts(cobol_stdout)
+    java_record_count_by_type: dict[str, object] = extract_counts(java_stdout)
+
+    # COMPARE THE RECORD COUNTS FOR EACH TYPE.
+    for record_count_type in ["input", "output", "error"]:
+        # CHECK IF BOTH COBOL AND JAVA RECORD COUNTS ARE THE SAME.
+        cobol_value: object = cobol_record_count_by_type.get(record_count_type)
+        java_value: object = java_record_count_by_type.get(record_count_type)
+        cobol_and_java_counts_are_the_same: bool = cobol_value == java_value
+        if not cobol_and_java_counts_are_the_same:
+            # TRACK THE MISMATCH.
+            differences.append(f"{record_count_type} count: COBOL={cobol_value}, Java={java_value}")
 
     return differences
-
 
 # ============================================================================
 # Test Runner
 # ============================================================================
 
-def run_integration_test(test_case: dict, verbose: bool = False,
-                         run_cobol_flag: bool = True,
-                         run_java_flag: bool = True) -> dict:
-    """Run a single integration test case.
-
-    Returns dict with keys: passed, failures, known_diff, cobol, java
-    """
-    name = test_case["name"]
-    input_path = TEST_CASES_DIR / name / "input.dat"
-    is_known_diff = name in KNOWN_DIFFERENCES
-
-    result = {
+## Run a single integration test case.
+##
+## Runs both the COBOL executable and Java JAR against the same input file,
+## then compares their outputs (return code, factor file, print file, stdout
+## record counts) to verify behavioral equivalence.
+##
+## \param[in] test_case - Test case definition dict containing:
+##     - "name" (str): Test case directory name under test_cases/.
+##     - "description" (str): Human-readable summary of what the test covers.
+## \param[in] verbose - If True, show detailed diff output for failures.
+## \param[in] run_cobol - If True, run the COBOL program.
+## \param[in] run_java - If True, run the Java program.
+## \return Result dict containing:
+##     - "passed" (bool): True if the test passed (or is a known difference).
+##     - "failures" (list[str]): Human-readable descriptions of each mismatch.
+##     - "known_diff" (bool): True if this test is in the KNOWN_DIFFERENCES list.
+##     - "cobol" (RunResult or None): COBOL run result, None if COBOL was skipped.
+##     - "java" (RunResult or None): Java run result, None if Java was skipped.
+def run_integration_test(
+    test_case: dict,
+    verbose: bool = False,
+    run_cobol: bool = True,
+    run_java: bool = True,
+) -> dict:
+    # INITIALIZE THE INTEGRATION TEST RESULT BY WHETHER OR NOT THE TEST IS A KNOWN DIFFERENCE.
+    name: str = test_case["name"]
+    is_known_difference: bool = name in KNOWN_DIFFERENCES
+    integration_test_result: dict = {
         "passed": True,
         "failures": [],
-        "known_diff": is_known_diff,
+        "known_diff": is_known_difference,
         "cobol": None,
         "java": None,
     }
 
-    if not input_path.exists():
-        result["passed"] = False
-        result["failures"].append(f"Input file not found: {input_path}")
-        return result
+    # GET THE INPUT CARD FILE PATH.
+    input_card_file_path: pathlib.Path = g_test_cases_directory_path / name / "input.dat"
+    input_card_file_exists: bool = input_card_file_path.exists()
+    if not input_card_file_exists:
+        # INDICATE THAT THE TEST FAILED BECAUSE THE INPUT CARD FILE WAS NOT FOUND.
+        integration_test_result["passed"] = False
+        integration_test_result["failures"].append(f"Input file not found: {input_card_file_path}")
+        return integration_test_result
 
-    tmpdir = tempfile.mkdtemp(prefix=f"clreb020_integ_{name}_")
-
+    # RUN THE COBOL AND JAVA PROGRAMS TO TEST WHETHER THEY'RE EQUIVALENT.
+    # A temporary directory is used to hold some files that will be cleaned up after the test.
+    temporary_directory_path: str = tempfile.mkdtemp(prefix = f"clreb020_integ_{name}_")
     try:
-        # Run both programs
-        if run_cobol_flag:
-            result["cobol"] = run_cobol(input_path, tmpdir)
-            if not result["cobol"].ok:
-                result["passed"] = False
-                result["failures"].append(f"COBOL: {result['cobol'].error}")
-                return result
+        # RUN THE COBOL PROGRAM IF REQUESTED.
+        if run_cobol:
+            # RUN THE COBOL PROGRAM.
+            integration_test_result["cobol"] = run_cobol(input_card_file_path, temporary_directory_path)
+            cobol_program_ran_successfully: bool = integration_test_result["cobol"].ok
+            if not cobol_program_ran_successfully:
+                # INDICATE THAT THE TEST FAILED BECAUSE THE COBOL PROGRAM DID NOT RUN SUCCESSFULLY.
+                integration_test_result["passed"] = False
+                integration_test_result["failures"].append(f"COBOL: {integration_test_result['cobol'].error}")
+                return integration_test_result
 
-        if run_java_flag:
-            result["java"] = run_java(input_path, tmpdir)
-            if not result["java"].ok:
-                result["passed"] = False
-                result["failures"].append(f"Java: {result['java'].error}")
-                return result
+        # RUN THE JAVA PROGRAM IF REQUESTED.
+        if run_java:
+            # RUN THE JAVA PROGRAM.
+            integration_test_result["java"] = run_java(input_card_file_path, temporary_directory_path)
+            java_program_ran_successfully: bool = integration_test_result["java"].ok
+            if not java_program_ran_successfully:
+                # INDICATE THAT THE TEST FAILED BECAUSE THE JAVA PROGRAM DID NOT RUN SUCCESSFULLY.
+                integration_test_result["passed"] = False
+                integration_test_result["failures"].append(f"Java: {integration_test_result['java'].error}")
+                return integration_test_result
 
-        # If only running one side, we can't compare — just report success
-        if not run_cobol_flag or not run_java_flag:
-            return result
+        # IF ONLY RUNNING ONE SIDE, WE CAN'T COMPARE — JUST REPORT SUCCESS.
+        running_only_one_side: bool = not run_cobol or not run_java
+        if running_only_one_side:
+            return integration_test_result
 
-        cobol = result["cobol"]
-        java = result["java"]
+        # COMPARE RETURN CODES.
+        cobol_result: RunResult = integration_test_result["cobol"]
+        java_result: RunResult = integration_test_result["java"]
+        return_codes_differ: bool = cobol_result.return_code != java_result.return_code
+        if return_codes_differ:
+            integration_test_result["failures"].append(f"Return code: COBOL={cobol_result.return_code}, Java={java_result.return_code}")
 
-        # --- Compare return codes ---
-        if cobol.return_code != java.return_code:
-            result["failures"].append(
-                f"Return code: COBOL={cobol.return_code}, Java={java.return_code}"
-            )
-
-        # --- Compare factor files (byte-for-byte) ---
-        if cobol.factor_content != java.factor_content:
-            c_len = len(cobol.factor_content)
-            j_len = len(java.factor_content)
-            result["failures"].append(
-                f"Factor file mismatch: COBOL={c_len} bytes, Java={j_len} bytes"
+        # COMPARE FACTOR FILES BYTE-FOR-BYTE.
+        factor_contents_differ: bool = cobol_result.factor_content != java_result.factor_content
+        if factor_contents_differ:
+            # TRACK THE MISMATCH.
+            cobol_factor_size_in_bytes: int = len(cobol_result.factor_content)
+            java_factor_size_in_bytes: int = len(java_result.factor_content)
+            integration_test_result["failures"].append(
+                f"Factor file mismatch: COBOL={cobol_factor_size_in_bytes} bytes, "
+                f"Java={java_factor_size_in_bytes} bytes"
             )
             if verbose:
-                # Show first differing byte
-                min_len = min(c_len, j_len)
-                for i in range(min_len):
-                    if cobol.factor_content[i] != java.factor_content[i]:
-                        result["failures"].append(
-                            f"  First diff at byte {i}: "
-                            f"COBOL=0x{cobol.factor_content[i]:02x}, "
-                            f"Java=0x{java.factor_content[i]:02x}"
+                # SHOW THE FIRST DIFFERING BYTE.
+                minimum_length_in_bytes: int = min(cobol_factor_size_in_bytes, java_factor_size_in_bytes)
+                for byte_index in range(minimum_length_in_bytes):
+                    # CHECK IF THIS BYTE DIFFERS.
+                    cobol_byte: int = cobol_result.factor_content[byte_index]
+                    java_byte: int = java_result.factor_content[byte_index]
+                    cobol_and_java_bytes_are_the_same: bool = cobol_byte == java_byte
+                    if not cobol_and_java_bytes_are_the_same:
+                        # TRACK THE MISMATCH.
+                        integration_test_result["failures"].append(
+                            f"  First diff at byte {byte_index}: "
+                            f"COBOL=0x{cobol_byte:02x}, Java=0x{java_byte:02x}"
                         )
                         break
 
-        # --- Compare print files (with date masking) ---
-        cobol_print_norm = normalize_print(cobol.print_content)
-        java_print_norm = normalize_print(java.print_content)
-        if cobol_print_norm != java_print_norm:
-            result["failures"].append("Print file mismatch (after date masking)")
+        # COMPARE PRINT FILES WITH DATE MASKING.
+        cobol_print_normalized: str = normalize_print(cobol_result.print_content)
+        java_print_normalized: str = normalize_print(java_result.print_content)
+        print_contents_differ: bool = cobol_print_normalized != java_print_normalized
+        if print_contents_differ:
+            # TRACK THE MISMATCH.
+            integration_test_result["failures"].append("Print file mismatch (after date masking)")
             if verbose:
-                # Show first differing line
-                c_lines = cobol_print_norm.split("\n")
-                j_lines = java_print_norm.split("\n")
-                max_lines = max(len(c_lines), len(j_lines))
-                for i in range(max_lines):
-                    c_line = c_lines[i] if i < len(c_lines) else "<EOF>"
-                    j_line = j_lines[i] if i < len(j_lines) else "<EOF>"
-                    if c_line != j_line:
-                        result["failures"].append(f"  Line {i+1} differs:")
-                        result["failures"].append(f"    COBOL: {repr(c_line[:80])}")
-                        result["failures"].append(f"    Java:  {repr(j_line[:80])}")
+                # SHOW THE FIRST DIFFERING LINE.
+                cobol_lines: list[str] = cobol_print_normalized.split("\n")
+                java_lines: list[str] = java_print_normalized.split("\n")
+                maximum_line_count: int = max(len(cobol_lines), len(java_lines))
+                for line_index in range(maximum_line_count):
+                    # GET THE COBOL AND JAVA LINES.
+                    # To avoid errors with some lines being out of range, we have <EOF> placeholders.
+                    cobol_line: str = cobol_lines[line_index] if line_index < len(cobol_lines) else "<EOF>"
+                    java_line: str = java_lines[line_index] if line_index < len(java_lines) else "<EOF>"
+
+                    # CHECK IF THIS LINE DIFFERS.
+                    cobol_and_java_lines_are_the_same: bool = cobol_line == java_line
+                    if not cobol_and_java_lines_are_the_same:
+                        # TRACK THE MISMATCH.
+                        integration_test_result["failures"].append(f"  Line {line_index + 1} differs:")
+                        integration_test_result["failures"].append(f"    COBOL: {repr(cobol_line[:80])}")
+                        integration_test_result["failures"].append(f"    Java:  {repr(java_line[:80])}")
                         break
 
-        # --- Compare stdout counts ---
-        stdout_diffs = compare_stdout(cobol.stdout, java.stdout)
-        if stdout_diffs:
-            for diff in stdout_diffs:
-                result["failures"].append(f"Stdout: {diff}")
+        # COMPARE STDOUT RECORD COUNTS.
+        stdout_differences: list[str] = compare_stdout(cobol_result.stdout, java_result.stdout)
+        if stdout_differences:
+            # TRACK EACH DIFFERENCE.
+            for difference in stdout_differences:
+                integration_test_result["failures"].append(f"Stdout: {difference}")
 
-        # --- Determine pass/fail ---
-        if result["failures"]:
-            if is_known_diff:
-                # Known difference: report but don't fail
-                result["passed"] = True
+        # DETERMINE PASS/FAIL BASED ON FAILURES AND KNOWN DIFFERENCES.
+        if integration_test_result["failures"]:
+            if is_known_difference:
+                integration_test_result["passed"] = True
             else:
-                result["passed"] = False
+                integration_test_result["passed"] = False
 
     finally:
+        # CLEAN UP THE TEMPORARY DIRECTORY.
         try:
-            shutil.rmtree(tmpdir)
+            shutil.rmtree(temporary_directory_path)
         except OSError:
             pass
 
-    return result
+    return integration_test_result
 
-
+## Check that COBOL exe and Java JAR exist.
+##
+## \return Tuple of (cobol_available, java_available) booleans.
 def check_prerequisites() -> tuple[bool, bool]:
-    """Check that COBOL exe and Java JAR exist.
+    # CHECK THAT THE COBOL EXECUTABLE AND JAVA JAR EXIST.
+    cobol_available: bool = g_cobol_executable_path.exists()
+    java_available: bool = g_java_jar_path.exists()
 
-    Returns (cobol_available, java_available).
-    """
-    cobol_ok = COBOL_EXE.exists()
-    java_ok = JAVA_JAR.exists()
-
-    # Also check that java runtime is available
-    if java_ok:
+    # ALSO VERIFY THAT THE JAVA RUNTIME IS ON THE PATH.
+    # A quick version check should complete almost instantly; 10 seconds
+    # is a generous upper bound for a slow or cold JVM start.
+    VERSION_CHECK_TIMEOUT_IN_SECONDS: int = 10
+    if java_available:
         try:
             subprocess.run(
                 ["java", "-version"],
-                capture_output=True,
-                timeout=10,
+                capture_output = True,
+                timeout = VERSION_CHECK_TIMEOUT_IN_SECONDS,
             )
         except (FileNotFoundError, subprocess.TimeoutExpired):
-            java_ok = False
+            java_available = False
 
-    return cobol_ok, java_ok
+    return cobol_available, java_available
 
-
-def main():
-    parser = argparse.ArgumentParser(
-        description="COBOL-vs-Java Integration Test for CLREB020"
-    )
-    parser.add_argument(
+## Main entry point for the integration test.
+##
+## Parses command line arguments, checks prerequisites, runs each test case,
+## and prints a summary report.
+##
+## \return Exit code (0 if all tests passed, 1 if any test failed).
+def main() -> int:
+    # PARSE THE COMMAND LINE ARGUMENTS.
+    command_line_argument_parser: argparse.ArgumentParser = argparse.ArgumentParser(
+        description = "COBOL-vs-Java Integration Test for CLREB020")
+    command_line_argument_parser.add_argument(
         "--verbose", "-v",
-        action="store_true",
-        help="Show detailed diff output for failures",
-    )
-    parser.add_argument(
+        action = "store_true",
+        help = "Show detailed diff output for failures")
+    command_line_argument_parser.add_argument(
         "--java-only",
-        action="store_true",
-        help="Run only the Java program (skip COBOL comparison)",
-    )
-    parser.add_argument(
+        action = "store_true",
+        help = "Run only the Java program (skip COBOL comparison)")
+    command_line_argument_parser.add_argument(
         "--cobol-only",
-        action="store_true",
-        help="Run only the COBOL program (skip Java comparison)",
-    )
-    args = parser.parse_args()
+        action = "store_true",
+        help = "Run only the COBOL program (skip Java comparison)")
+    command_line_arguments: argparse.Namespace = command_line_argument_parser.parse_args()
 
-    print("=" * 70)
+    # PRINT AN INFORMATIONAL BANNER.
+    HEADER_SEPARATOR_CHARACTER: str = "="
+    HEADER_SEPARATOR_CHARACTER_COUNT: int = 70
+    HEADER_SEPARATOR_LINE: str = HEADER_SEPARATOR_CHARACTER * HEADER_SEPARATOR_CHARACTER_COUNT
+    print(HEADER_SEPARATOR_LINE)
     print("CLREB020 COBOL-vs-JAVA INTEGRATION TEST")
-    print("=" * 70)
+    print(HEADER_SEPARATOR_LINE)
     print()
 
-    # Check prerequisites
-    cobol_ok, java_ok = check_prerequisites()
-    run_cobol_flag = not args.java_only
-    run_java_flag = not args.cobol_only
-
-    print(f"  COBOL executable: {COBOL_EXE}")
-    print(f"    Status: {'FOUND' if cobol_ok else 'NOT FOUND'}")
-    print(f"  Java JAR:         {JAVA_JAR}")
-    print(f"    Status: {'FOUND' if java_ok else 'NOT FOUND'}")
-    print(f"  Test cases:       {TEST_CASES_DIR}")
+    # CHECK PREREQUISITES.
+    cobol_available, java_available = check_prerequisites()
+    run_cobol: bool = not command_line_arguments.java_only
+    run_java: bool = not command_line_arguments.cobol_only
+    print(f"  COBOL executable: {g_cobol_executable_path}")
+    print(f"    Status: {'FOUND' if cobol_available else 'NOT FOUND'}")
+    print(f"  Java JAR:         {g_java_jar_path}")
+    print(f"    Status: {'FOUND' if java_available else 'NOT FOUND'}")
+    print(f"  Test cases:       {g_test_cases_directory_path}")
     print()
 
-    if run_cobol_flag and not cobol_ok:
+    # CHECK IF THE COBOL PROGRAM CAN ACTUALLY BE RUN.
+    ERROR_EXIT_CODE: int = 1
+    cobol_program_can_be_run: bool = cobol_available and run_cobol
+    if not cobol_program_can_be_run:
+        # PROVIDE VISIBILITY INOT THE ERROR.
         print("ERROR: COBOL executable not found. Build with:")
         print("  python Build/build.py --compile")
         print()
-        if not args.java_only:
-            sys.exit(1)
 
-    if run_java_flag and not java_ok:
+        # EXIT IF WE'RE NOT ONLY RUNNING JAVA TESTS.
+        if not command_line_arguments.java_only:
+            return ERROR_EXIT_CODE
+
+    # CHECK IF THE JAVA PROGRAM CAN ACTUALLY BE RUN.
+    java_program_can_be_run: bool = java_available and run_java
+    if not java_program_can_be_run:
+        # PROVIDE VISIBILITY INOT THE ERROR.
         print("WARNING: Java JAR not found or Java runtime not available.")
         print("  Build with: cd tax_extension_java && mvn clean package -q")
         print("  Install JDK 17+ from: https://adoptium.net/")
         print()
-        if not args.cobol_only:
-            if not cobol_ok:
-                print("Neither COBOL nor Java is available. Cannot run tests.")
-                sys.exit(1)
-            print("Falling back to COBOL-only mode.")
-            run_java_flag = False
-            run_cobol_flag = True
 
-    comparison_mode = "COMPARISON" if (run_cobol_flag and run_java_flag) else (
-        "COBOL-only" if run_cobol_flag else "Java-only"
+        # EXIT IF WE'RE NOT ONLY RUNNING COBOL TESTS.
+        if not command_line_arguments.cobol_only:
+            # CHECK IF COBOL IS AVAILABLE.
+            if not cobol_available:
+                print("Neither COBOL nor Java is available. Cannot run tests.")
+                return ERROR_EXIT_CODE
+
+            print("Falling back to COBOL-only mode.")
+            run_java = False
+            run_cobol = True
+
+    # DETERMINE AND DISPLAY THE COMPARISON MODE.
+    running_both: bool = run_cobol and run_java
+    comparison_mode: str = "COMPARISON" if running_both else (
+        "COBOL-only" if run_cobol else "Java-only"
     )
     print(f"  Mode: {comparison_mode}")
     print()
-    print("-" * 70)
+    MINOR_SEPARATOR_CHARACTER: str = "-"
+    MINOR_SEPARATOR_LINE: str = MINOR_SEPARATOR_CHARACTER * HEADER_SEPARATOR_CHARACTER_COUNT
+    print(MINOR_SEPARATOR_LINE)
 
-    total = len(TEST_CASES)
-    passed = 0
-    failed = 0
-    known_diff_count = 0
-    errors = []
-
+    # RUN EACH TEST CASE AND ACCUMULATE RESULTS.
+    total_test_count: int = len(TEST_CASES)
+    passed_count: int = 0
+    failed_count: int = 0
+    known_difference_count: int = 0
+    failure_details: list[tuple[str, list[str]]] = []
     for test_case in TEST_CASES:
-        name = test_case["name"]
-        desc = test_case["description"]
-
-        result = run_integration_test(
+        # RUN THE TEST CASE.
+        test_case_result: dict = run_integration_test(
             test_case,
-            verbose=args.verbose,
-            run_cobol_flag=run_cobol_flag,
-            run_java_flag=run_java_flag,
-        )
+            verbose = command_line_arguments.verbose,
+            run_cobol = run_cobol,
+            run_java = run_java)
 
-        if result["passed"]:
-            if result["known_diff"] and result["failures"]:
+        # CHECK IF THE TEST PASSED OR FAILED.
+        # Some identifying metadata is need about the test for some reporting purposes.
+        test_case_name: str = test_case["name"]
+        test_case_description: str = test_case["description"]
+        status: str = ""
+        if test_case_result["passed"]:
+            # CHECK IF THIS IS A KNOWN DIFFERENCE WITH FAILURES.
+            is_known_difference_with_failures: bool = test_case_result["known_diff"] and test_case_result["failures"]
+            if is_known_difference_with_failures:
+                # TRACK THE KNOWN DIFFERENCE.
                 status = "KNOWN"
-                known_diff_count += 1
+                known_difference_count += 1
             else:
+                # INDICATE THIS IS A NORMAL PASS.
                 status = "PASS"
-            passed += 1
+
+            # COUNT THE PASSED TEST.
+            passed_count += 1
         else:
+            # TRACK THE FAILURE.
             status = "FAIL"
-            failed += 1
-            errors.append((name, result["failures"]))
+            failed_count += 1
+            failure_details.append((test_case_name, test_case_result["failures"]))
 
-        # Format return codes
-        rc_parts = []
-        if result["cobol"] and result["cobol"].ok:
-            rc_parts.append(f"COB_RC={result['cobol'].return_code}")
-        if result["java"] and result["java"].ok:
-            rc_parts.append(f"JAV_RC={result['java'].return_code}")
-        rc_str = " ".join(rc_parts)
+        # FORMAT THE RETURN CODES FOR DISPLAY.
+        return_code_parts: list[str] = []
 
-        print(f"  [{status:5s}] {name:<25} {rc_str}")
+        # Any COBOL portions should be included.
+        cobol_results_exist: bool = bool(test_case_result["cobol"])
+        if cobol_results_exist:
+            # CHECK IF THE COBOL TEST WAS OKAY.
+            cobol_test_ok: bool = test_case_result["cobol"].ok
+            if cobol_test_ok:
+                # ADD THE COBOL TEST RETURN CODE INFORMATION.
+                return_code_parts.append(f"COB_RC={test_case_result['cobol'].return_code}")
 
-        if args.verbose and result["failures"]:
-            for failure in result["failures"]:
-                prefix = "KNOWN: " if result["known_diff"] else "DIFF:  "
+        # Any Java portions should be included.
+        java_results_exist: bool = bool(test_case_result["java"])
+        if java_results_exist:
+            # CHECK IF THE JAVA TEST WAS OKAY.
+            java_test_ok: bool = test_case_result["java"].ok
+            if java_test_ok:
+                # ADD THE JAVA TEST RETURN CODE INFORMATION.
+                return_code_parts.append(f"JAV_RC={test_case_result['java'].return_code}")
+
+        # All return code parts need to be combined.
+        return_code_string: str = " ".join(return_code_parts)
+
+        # PRINT THE FINAL OVERALL SUMMARY FOR THIS TEST.
+        print(f"  [{status:5s}] {test_case_name:<25} {return_code_string}")
+
+        # CHECK IF FAILURE DETAILS SHOULD BE PRINTED.
+        failure_details_should_be_printed: bool = command_line_arguments.verbose and test_case_result["failures"]
+        if failure_details_should_be_printed:
+            for failure in test_case_result["failures"]:
+                # PRINT THE FAILURE WITH AN APPROPRIATE PREFIX.
+                prefix: str = "KNOWN: " if test_case_result["known_diff"] else "DIFF:  "
                 print(f"           {prefix}{failure}")
 
-    print("-" * 70)
+    # PRINT THE SUMMARY REPORT.
+    print(MINOR_SEPARATOR_LINE)
     print()
 
-    if run_cobol_flag and run_java_flag:
-        print(f"Results: {passed} passed, {failed} failed, "
-              f"{known_diff_count} known differences, {total} total")
+    # Overall test summary statistics should be printed.
+    if running_both:
+        print(f"Results: {passed_count} passed, {failed_count} failed, "
+              f"{known_difference_count} known differences, {total_test_count} total")
     else:
-        print(f"Results: {passed} passed, {failed} failed, {total} total")
+        print(f"Results: {passed_count} passed, {failed_count} failed, {total_test_count} total")
     print()
 
-    if known_diff_count > 0:
+    # Known differences should be printed if they exist.
+    known_differences_exist: bool = known_difference_count > 0
+    if known_differences_exist:
+        # PRINT ALL KNOWN DIFFERENCES.
         print("KNOWN DIFFERENCES (not counted as failures):")
-        for tc_name, description in KNOWN_DIFFERENCES.items():
-            print(f"  {tc_name}: {description}")
+        for test_case_name, description in KNOWN_DIFFERENCES.items():
+            # PRINT THE CURRENT KNOWN DIFFERENCE.
+            print(f"  {test_case_name}: {description}")
         print()
 
-    if errors:
+    # Specific failures should also be printed.
+    if failure_details:
+        # PRINT ALL FAILURES.
         print("FAILURES:")
-        for name, failures in errors:
+        for name, failures in failure_details:
+            # PRINT ALL FAILURES FOR THE CURRENT TEST.
             print(f"  {name}:")
             for failure in failures:
                 print(f"    - {failure}")
             print()
 
-    return 0 if failed == 0 else 1
-
+    # RETURN THE APPROPRIATE EXIT CODE.
+    SUCCESS_EXIT_CODE: int = 0
+    exit_code: int = SUCCESS_EXIT_CODE if failed_count == 0 else ERROR_EXIT_CODE
+    return exit_code
 
 if __name__ == "__main__":
     sys.exit(main())
